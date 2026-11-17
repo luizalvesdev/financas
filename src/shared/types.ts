@@ -65,10 +65,33 @@ export type Income = {
   recurrenceContinues: boolean;
 };
 
+export type Investment = {
+  id: string;
+  description: string;
+  amountCents: number;
+  investedOn: string;
+  memberId: string | null;
+};
+
+export type InvestmentInput = {
+  description: string;
+  amountCents: number;
+  investedOn: string;
+  memberId: string | null;
+};
+
+export type InvestmentsMonth = {
+  investments: Investment[];
+  monthCents: number;
+  // Everything invested so far, across all months.
+  totalCents: number;
+};
+
 export type MonthEntries = {
   expenses: Expense[];
   incomes: Income[];
-  // Incomes minus expenses of the months since the last reset, up to the month before this one.
+  investments: Investment[];
+  // Incomes minus expenses and investments of the months since the last reset, up to the month before this one.
   carryOverCents: number;
   // This month's leftover balance was cleared, so the next month carries nothing over.
   balanceReset: boolean;
@@ -107,6 +130,8 @@ export type ExpenseInput = {
   paid: boolean;
   installments?: number;
   recurring?: boolean;
+  firstAmountCents?: number;
+  nextOn?: string;
   rawText?: string | null;
 };
 
@@ -138,6 +163,7 @@ export type Dashboard = {
   incomesCents: number;
   expensesCents: number;
   paidCents: number;
+  investmentsCents: number;
   balanceCents: number;
   accumulatedCents: number;
   byCategory: Breakdown[];

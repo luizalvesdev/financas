@@ -11,6 +11,7 @@ export default function AppLayout() {
         <Stack.Screen name="(tabs)" />
         <Stack.Screen name="expense/new" options={{ presentation: 'modal' }} />
         <Stack.Screen name="income/new" options={{ presentation: 'modal' }} />
+        <Stack.Screen name="investment/new" options={{ presentation: 'modal' }} />
       </Stack>
     </AppDataProvider>
   );

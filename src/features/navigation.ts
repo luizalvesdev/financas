@@ -30,6 +30,14 @@ export function useEntryActions() {
       if (desktop) return desktop.open({ kind: 'income', id });
       router.push(`/income/${id}`);
     },
+    newInvestment() {
+      if (desktop) return desktop.open({ kind: 'new-investment' });
+      router.push('/investment/new');
+    },
+    editInvestment(id: string) {
+      if (desktop) return desktop.open({ kind: 'investment', id });
+      router.push(`/investment/${id}`);
+    },
     openPlan(id: string, title = 'Parcelamento') {
       if (desktop) return desktop.open({ kind: 'plan', id, title });
       router.push(`/installment/${id}`);

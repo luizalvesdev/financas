@@ -16,9 +16,8 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { formatDate, formatMoney, formatMonth, parseDate } from '@/lib/format';
+import { formatMoney, formatMonth } from '@/lib/format';
 import { fonts, type Palette, radius, shadow, space, useColors, type Weight } from '@/lib/theme';
-import { today } from '@/shared/dates';
 
 export type IconName = ComponentProps<typeof Ionicons>['name'];
 
@@ -368,42 +367,6 @@ export function MoneyField({
         ]}
       />
       {warn && <Hint tone="warn">{warn}</Hint>}
-    </View>
-  );
-}
-
-function yesterday(): string {
-  const d = new Date(`${today()}T12:00:00Z`);
-  d.setUTCDate(d.getUTCDate() - 1);
-  return d.toISOString().slice(0, 10);
-}
-
-export function DateField({ label, value, onChange }: { label: string; value: string; onChange: (iso: string) => void }) {
-  const [text, setText] = useState(formatDate(value));
-  const set = (iso: string) => {
-    setText(formatDate(iso));
-    onChange(iso);
-  };
-  const options = [
-    { value: today(), label: 'Hoje' },
-    { value: yesterday(), label: 'Ontem' },
-  ];
-  return (
-    <View style={{ gap: space.sm }}>
-      <Field
-        label={label}
-        icon="calendar-outline"
-        value={text}
-        placeholder="DD/MM/AAAA"
-        keyboardType="numbers-and-punctuation"
-        highlight={parseDate(text) === null}
-        onChangeText={(t) => {
-          setText(t);
-          const iso = parseDate(t);
-          if (iso) onChange(iso);
-        }}
-      />
-      <Chips options={options} value={options.find((o) => o.value === value)?.value ?? null} onChange={(v) => v && set(v)} />
     </View>
   );
 }

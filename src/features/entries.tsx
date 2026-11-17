@@ -334,10 +334,14 @@ function useFilteredEntries(data: MonthEntries | null, f: Filters) {
     const incomes = (data?.incomes ?? []).filter(
       (i) => !expenseOnly && (!f.member || i.memberId === f.member) && (!search || i.description.toLowerCase().includes(search)),
     );
+    const investments = (data?.investments ?? []).filter(
+      (i) => !expenseOnly && (!f.member || i.memberId === f.member) && (!search || i.description.toLowerCase().includes(search)),
+    );
     const newestFirst = (list: Expense[]) => [...list].sort((a, b) => b.spentOn.localeCompare(a.spentOn));
     const sumOf = (list: Expense[]) => list.reduce((s, e) => s + e.amountCents, 0);
     const installments = expenses.filter((e) => e.installmentPlanId);
     const recurring = expenses.filter((e) => !e.installmentPlanId && e.recurringExpenseId);
+    const loose = expenses.filter((e) => !e.installmentPlanId && !e.recurringExpenseId);
     return {
       expenses,
       incomes,
@@ -345,11 +349,11 @@ function useFilteredEntries(data: MonthEntries | null, f: Filters) {
       installmentCents: sumOf(installments),
       recurring: newestFirst(recurring),
       recurringCents: sumOf(recurring),
-      expenseDays: byDay(
-        expenses.filter((e) => !e.installmentPlanId && !e.recurringExpenseId),
-        (e) => e.spentOn,
-      ),
+      looseCount: loose.length,
+      looseCents: sumOf(loose),
+      expenseDays: byDay(loose, (e) => e.spentOn),
       incomeDays: byDay(incomes, (i) => i.receivedOn),
+      investmentCents: investments.reduce((s, i) => s + i.amountCents, 0),
       expenseCents: expenses.reduce((s, e) => s + e.amountCents, 0),
       incomeCents: incomes.reduce((s, i) => s + i.amountCents, 0),
       paidCents: expenses.filter((e) => e.paid).reduce((s, e) => s + e.amountCents, 0),
@@ -500,14 +504,15 @@ function MonthStats({
   totals,
   data,
 }: {
-  totals: { incomeCents: number; expenseCents: number; paidCents: number };
+  totals: { incomeCents: number; expenseCents: number; paidCents: number; investmentCents: number };
   data: MonthEntries | null;
 }) {
   const { month, changed } = useAppData();
   const ask = useConfirm();
   const [resetting, setResetting] = useState(false);
   const [resetError, setResetError] = useState<string | null>(null);
-  const forecast = totals.incomeCents - totals.expenseCents;
+  // Money put into investments leaves the balance, like an expense.
+  const forecast = totals.incomeCents - totals.expenseCents - totals.investmentCents;
   const toggleReset = async () => {
     const undo = Boolean(data?.balanceReset);
     const monthName = formatMonth(month).toLowerCase();
@@ -534,6 +539,7 @@ function MonthStats({
       <Stat label="Gastos do mês" cents={totals.expenseCents} />
       <Stat label="Já pago" cents={totals.paidCents} />
       <Stat label="A pagar" cents={totals.expenseCents - totals.paidCents} tone="warn" />
+      <Stat label="Investido" cents={totals.investmentCents} />
       <Stat label="Saldo previsto" cents={forecast} tone="balance" />
       <Stat
         label="Saldo com mês anterior"
@@ -745,7 +751,14 @@ export function MobileEntries() {
                   ))}
                   {groups.length > 0 && view.expenseDays.length > 0 && (
                     <View style={{ paddingTop: space.xs }}>
-                      <SectionTitle>Lançamentos avulsos</SectionTitle>
+                      <SectionTitle
+                        right={
+                          <Txt size={13} weight={700} color={c.text2} numeric>
+                            {formatMoney(view.looseCents)}
+                          </Txt>
+                        }>
+                        Lançamentos avulsos
+                      </SectionTitle>
                     </View>
                   )}
                   <DayList days={view.expenseDays} render={expenseRow} />
@@ -894,9 +907,12 @@ export function DesktopEntries() {
         Gastos <Txt size={14} weight={700}>{formatMoney(view.expenseCents)}</Txt>
       </Txt>
       <Txt size={14} weight={600}>
+        Investido <Txt size={14} weight={700}>{formatMoney(view.investmentCents)}</Txt>
+      </Txt>
+      <Txt size={14} weight={600}>
         Saldo{' '}
-        <Txt size={14} weight={700} color={view.incomeCents - view.expenseCents < 0 ? c.err : c.ok}>
-          {formatMoney(view.incomeCents - view.expenseCents)}
+        <Txt size={14} weight={700} color={view.incomeCents - view.expenseCents - view.investmentCents < 0 ? c.err : c.ok}>
+          {formatMoney(view.incomeCents - view.expenseCents - view.investmentCents)}
         </Txt>
       </Txt>
     </>
@@ -1028,9 +1044,14 @@ export function DesktopEntries() {
               </View>
             ))}
           {lookups && groups.length > 0 && view.expenseDays.length > 0 && (
-            <Txt size={17} weight={700} style={{ marginTop: space.xs }}>
-              Lançamentos avulsos
-            </Txt>
+            <View style={[styles.between, { marginTop: space.xs }]}>
+              <Txt size={17} weight={700}>
+                Lançamentos avulsos
+              </Txt>
+              <Txt size={13} weight={700} color={c.text2} numeric>
+                {`${view.looseCount} ${view.looseCount === 1 ? 'lançamento' : 'lançamentos'} · ${formatMoney(view.looseCents)}`}
+              </Txt>
+            </View>
           )}
           {(loading || !lookups || groups.length === 0 || view.expenseDays.length > 0) && (
             <Table columns={EXPENSE_COLUMNS}>
@@ -1099,6 +1120,7 @@ export function DesktopEntries() {
               ))
             )}
           </Table>
+
         </View>
       </View>
     </DesktopPage>

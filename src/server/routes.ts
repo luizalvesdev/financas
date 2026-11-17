@@ -5,7 +5,19 @@ import { parseEntry } from './ai';
 import { createInvite, deleteAccount, login, logout, register, requireMember } from './auth';
 import * as finance from './finance';
 import { body, route } from './http';
-import { cents, closingDay, expenseCreate, expenseUpdate, goalCents, incomeCreate, incomeUpdate, month, planUpdate, uuid } from './validation';
+import {
+  cents,
+  closingDay,
+  expenseCreate,
+  expenseUpdate,
+  goalCents,
+  incomeCreate,
+  incomeUpdate,
+  investmentInput,
+  month,
+  planUpdate,
+  uuid,
+} from './validation';
 
 type Handler = (request: Request, params: string[]) => Promise<Response>;
 type Route = { method: string; pattern: RegExp; handler: Handler };
@@ -177,6 +189,42 @@ const routes: Route[] = [
     method: 'POST',
     pattern: new RegExp(`^incomes/${ID}/stop-recurring$`),
     handler: async (request, [id]) => (await finance.stopRecurringIncome(await hidOf(request), uuid.parse(id)), ok()),
+  },
+  {
+    method: 'GET',
+    pattern: /^investments$/,
+    handler: async (request) => json(await finance.listInvestments(await hidOf(request), monthParam(request))),
+  },
+  {
+    method: 'POST',
+    pattern: /^investments$/,
+    handler: async (request) => {
+      const me = await requireMember(request);
+      const input = await body(request, investmentInput);
+      await finance.assertReferences(me.householdId, input);
+      return json(await finance.createInvestment(input, me), 201);
+    },
+  },
+  {
+    method: 'GET',
+    pattern: new RegExp(`^investments/${ID}$`),
+    handler: async (request, [id]) => json(await finance.getInvestment(await hidOf(request), uuid.parse(id))),
+  },
+  {
+    method: 'PATCH',
+    pattern: new RegExp(`^investments/${ID}$`),
+    handler: async (request, [id]) => {
+      const hid = await hidOf(request);
+      const input = await body(request, investmentInput);
+      await finance.assertReferences(hid, input);
+      await finance.updateInvestment(hid, uuid.parse(id), input);
+      return ok();
+    },
+  },
+  {
+    method: 'DELETE',
+    pattern: new RegExp(`^investments/${ID}$`),
+    handler: async (request, [id]) => (await finance.deleteInvestment(await hidOf(request), uuid.parse(id)), ok()),
   },
   {
     method: 'GET',

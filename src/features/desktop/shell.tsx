@@ -10,13 +10,15 @@ import { useAppData } from '@/lib/data';
 import { space, useColors } from '@/lib/theme';
 import type { Draft } from '@/shared/types';
 
-import { EditExpense, EditIncome, NewExpense, NewIncome, PlanDetail } from '../editors';
+import { EditExpense, EditIncome, EditInvestment, NewExpense, NewIncome, NewInvestment, PlanDetail } from '../editors';
 
 export type DrawerSpec =
   | { kind: 'new-expense'; draft?: Draft | null; installments?: boolean }
   | { kind: 'expense'; id: string }
   | { kind: 'new-income'; draft?: Draft | null }
   | { kind: 'income'; id: string }
+  | { kind: 'new-investment' }
+  | { kind: 'investment'; id: string }
   | { kind: 'plan'; id: string; title: string };
 
 type Desktop = { open: (spec: DrawerSpec) => void; close: () => void; selectedId: string | null };
@@ -27,8 +29,9 @@ export function useDesktop(): Desktop | null {
   return useContext(DesktopContext);
 }
 
-const NAV: { href: Href; path: string; label: string; icon: IconName }[] = [
+export const NAV: { href: Href; path: string; label: string; icon: IconName }[] = [
   { href: '/', path: '/', label: 'Lançamentos', icon: 'list-outline' },
+  { href: '/investments', path: '/investments', label: 'Investimentos', icon: 'trending-up-outline' },
   { href: '/dashboard', path: '/dashboard', label: 'Painel', icon: 'pie-chart-outline' },
   { href: '/installments', path: '/installments', label: 'Parcelamentos', icon: 'card-outline' },
   { href: '/recurring', path: '/recurring', label: 'Recorrentes', icon: 'repeat-outline' },
@@ -127,6 +130,10 @@ function drawerTitle(spec: DrawerSpec): string {
       return 'Nova entrada';
     case 'income':
       return 'Editar entrada';
+    case 'new-investment':
+      return 'Novo investimento';
+    case 'investment':
+      return 'Editar investimento';
     case 'plan':
       return spec.title;
   }
@@ -150,6 +157,10 @@ function DrawerBody({ spec, close, open }: { spec: DrawerSpec; close: () => void
       return <NewIncome draft={spec.draft ?? null} layout="drawer" onDone={close} onCancel={close} />;
     case 'income':
       return <EditIncome id={spec.id} layout="drawer" onDone={close} onCancel={close} />;
+    case 'new-investment':
+      return <NewInvestment layout="drawer" onDone={close} onCancel={close} />;
+    case 'investment':
+      return <EditInvestment id={spec.id} layout="drawer" onDone={close} onCancel={close} />;
     case 'plan':
       return <PlanDetail id={spec.id} layout="drawer" onDone={close} />;
   }

@@ -37,8 +37,8 @@ const SYSTEM = `Você transforma frases curtas em português sobre dinheiro em u
 Regras:
 - kind: "income" quando a pessoa recebeu dinheiro (salário, pix recebido, venda); senão "expense".
 - description: nome curto e limpo do item, com inicial maiúscula (ex.: "Salgado", "Uber", "Mercado").
-- amount_cents: o valor em centavos exatamente como aparece na frase. "10 reais" = 1000, "R$ 47,90" = 4790, "10x de 439,90" = 43990.
-- amount_is_installment: true quando o valor citado é o de cada parcela ("10x de 439,90"); false quando é o total ("2000 em 10x") ou à vista.
+- amount_reais: o valor em REAIS exatamente como aparece na frase, como número decimal (nunca em centavos). "10 reais" = 10, "R$ 47,90" = 47.9, "2000 em 12x" = 2000, "10x de 439,90" = 439.9, "1.500" = 1500.
+- amount_is_installment: true SOMENTE quando a frase diz explicitamente o valor de cada parcela ("10x de 439,90", "10 parcelas de 439,90"). Valor seguido de "em Nx" é o TOTAL da compra: "1000 em 12x" e "comprei por 2000 em 10x" são false. À vista também é false. Na dúvida, false.
 - installments: número de parcelas quando a compra for parcelada ("em 10x", "parcelei em 3"); senão null.
 - date: data no formato AAAA-MM-DD. Interprete "hoje", "ontem", "anteontem", dias da semana e "dia 11" (mês atual, ou o anterior se ainda não chegou) a partir da data de hoje informada. Sem data na frase, use hoje.
 - category, account, member, payment_method: escolha somente entre as opções listadas. Se não der para deduzir, use null. Não invente.
@@ -53,7 +53,7 @@ function buildSchema(lookups: Lookups) {
   return z.object({
     kind: z.enum(['expense', 'income']),
     description: z.string(),
-    amount_cents: z.number().int().nullable(),
+    amount_reais: z.number().nullable(),
     amount_is_installment: z.boolean(),
     installments: z.number().int().nullable(),
     date: z.string(),
@@ -67,6 +67,15 @@ function buildSchema(lookups: Lookups) {
 function weekday(isoDate: string): string {
   const [y, m, d] = isoDate.split('-').map(Number);
   return new Intl.DateTimeFormat('pt-BR', { weekday: 'long', timeZone: 'UTC' }).format(new Date(Date.UTC(y, m - 1, d)));
+}
+
+// The model sometimes flags "1000 em 12x" as a per-installment amount, so trust explicit wording first:
+// "12x de 83,33" / "12 parcelas de 83,33" = per installment; "1000 em 12x" / "1000 parcelado em 12" = total.
+export function amountIsInstallment(text: string, modelGuess: boolean): boolean {
+  const t = text.toLowerCase();
+  if (/\d+\s*(x|vezes|parcelas?)\s*de\s*(r\$\s*)?\d/.test(t)) return true;
+  if (/\bem\s*\d+\s*(x|vezes|parcelas?)\b|parcel\w*\s*em\s*\d+/.test(t)) return false;
+  return modelGuess;
 }
 
 export async function parseEntry(text: string, lookups: Lookups): Promise<Draft> {
@@ -114,8 +123,8 @@ export async function parseEntry(text: string, lookups: Lookups): Promise<Draft>
   if (!paymentMethod && accountId) paymentMethod = 'credito';
 
   const installments = out.installments && out.installments > 1 ? Math.min(out.installments, 120) : null;
-  const amount = out.amount_cents && out.amount_cents > 0 ? out.amount_cents : null;
-  const total = amount && installments && out.amount_is_installment ? amount * installments : amount;
+  const amount = out.amount_reais && out.amount_reais > 0 ? Math.round(out.amount_reais * 100) : null;
+  const total = amount && installments && amountIsInstallment(text, out.amount_is_installment) ? amount * installments : amount;
 
   return {
     kind: out.kind,

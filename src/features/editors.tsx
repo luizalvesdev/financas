@@ -3,14 +3,23 @@ import { type ReactNode, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { useConfirm } from '@/components/confirm';
-import { ExpenseForm, type FormLayout, IncomeForm } from '@/components/entry-forms';
+import { ExpenseForm, type FormLayout, IncomeForm, InvestmentForm } from '@/components/entry-forms';
 import { Button, Card, Chips, ErrorNote, Field, Note, PaidToggle, SectionTitle, Spinner, Tag, Txt } from '@/components/ui';
 import { api } from '@/lib/api';
 import { useAppData, useRemote } from '@/lib/data';
 import { formatDate, formatMoney, formatMonth } from '@/lib/format';
 import { radius, space, useColors } from '@/lib/theme';
 import { monthOf, monthStart, today } from '@/shared/dates';
-import { type Draft, type Expense, type Income, type InstallmentPlan, type Lookups, PAYMENT_METHODS, type PaymentMethod } from '@/shared/types';
+import {
+  type Draft,
+  type Expense,
+  type Income,
+  type InstallmentPlan,
+  type Investment,
+  type Lookups,
+  PAYMENT_METHODS,
+  type PaymentMethod,
+} from '@/shared/types';
 
 type EditorProps = {
   layout: FormLayout;
@@ -252,6 +261,79 @@ export function EditIncome({ id, ...props }: EditorProps & { id: string }) {
       }
       onSubmit={async (values) => {
         await api(`/incomes/${income.id}`, { method: 'PATCH', body: values });
+        changed();
+        props.onDone();
+      }}
+    />
+  );
+}
+
+export function NewInvestment(props: EditorProps) {
+  const { lookups, changed } = useAppData();
+  if (!lookups) return <Spinner />;
+  return (
+    <InvestmentForm
+      lookups={lookups}
+      mode="create"
+      layout={props.layout}
+      header={props.header}
+      onCancel={props.onCancel}
+      initial={{ description: '', amountCents: null, investedOn: today(), memberId: lookups.me.id }}
+      onSubmit={async (values) => {
+        await api('/investments', { method: 'POST', body: values });
+        changed();
+        props.onDone();
+      }}
+    />
+  );
+}
+
+export function EditInvestment({ id, ...props }: EditorProps & { id: string }) {
+  const ask = useConfirm();
+  const { lookups, changed } = useAppData();
+  const { data: investment, error } = useRemote<Investment>(`/investments/${id}`);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  if (error) return <View style={{ padding: space.lg }}><ErrorNote>{error}</ErrorNote></View>;
+  if (!lookups || !investment) return <Spinner />;
+
+  return (
+    <InvestmentForm
+      key={investment.id}
+      lookups={lookups}
+      mode="edit"
+      layout={props.layout}
+      header={props.header}
+      onCancel={props.onCancel}
+      initial={{
+        description: investment.description,
+        amountCents: investment.amountCents,
+        investedOn: investment.investedOn,
+        memberId: investment.memberId,
+      }}
+      bottom={
+        <View style={{ gap: 10 }}>
+          <ErrorNote>{actionError}</ErrorNote>
+          <Button
+            title="Apagar"
+            variant="danger"
+            icon="trash-outline"
+            onPress={async () => {
+              if (await ask({ title: 'Apagar investimento?', message: `"${investment.description}" será apagado.`, action: 'Apagar' })) {
+                try {
+                  await api(`/investments/${investment.id}`, { method: 'DELETE' });
+                  changed();
+                  props.onDone();
+                } catch (e) {
+                  setActionError(e instanceof Error ? e.message : 'Erro');
+                }
+              }
+            }}
+          />
+        </View>
+      }
+      onSubmit={async (values) => {
+        await api(`/investments/${investment.id}`, { method: 'PATCH', body: values });
         changed();
         props.onDone();
       }}

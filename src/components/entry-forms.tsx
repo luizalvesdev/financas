@@ -4,9 +4,11 @@ import { ScrollView, StyleSheet, View } from 'react-native';
 import { formatMoney, formatMonth } from '@/lib/format';
 import { space, useColors } from '@/lib/theme';
 import { billingMonth } from '@/shared/billing';
+import { addMonths, dateInMonth, monthOf } from '@/shared/dates';
 import { type Lookups, PAYMENT_METHODS, type PaymentMethod } from '@/shared/types';
 
-import { Button, Chips, DateField, ErrorNote, Field, MoneyField, Note, Screen, SwitchRow } from './ui';
+import { DateField } from './calendar';
+import { Button, Chips, ErrorNote, Field, MoneyField, Note, Screen, SwitchRow } from './ui';
 
 export type FormLayout = 'screen' | 'drawer';
 
@@ -77,6 +79,8 @@ export type ExpenseSubmit = {
   paid: boolean;
   installments?: number;
   recurring?: boolean;
+  firstAmountCents?: number;
+  nextOn?: string;
   applyToFuture?: boolean;
 };
 
@@ -111,6 +115,10 @@ export function ExpenseForm({
 }) {
   const [v, setV] = useState(initial);
   const [applyToFuture, setApplyToFuture] = useState(recurrenceContinues ?? false);
+  // Recurring with a different first charge: intro price (gym promo) or a gap before the monthly charges (enrollment).
+  const [firstDifferent, setFirstDifferent] = useState(false);
+  const [firstAmount, setFirstAmount] = useState<number | null>(null);
+  const [nextOn, setNextOn] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [tried, setTried] = useState(false);
@@ -125,6 +133,12 @@ export function ExpenseForm({
   const members = lookups.members.map((m) => ({ value: m.id, label: m.name }));
 
   const installments = v.installments ?? 1;
+  // A new expense, or a plain one being edited, can become installments or recurring.
+  const canConvert = mode === 'create' || Boolean(canBeRecurring);
+  const canSplitFirst = canConvert && installments <= 1 && v.recurring;
+  const splitFirst = canSplitFirst && firstDifferent;
+  const nextDate = nextOn ?? dateInMonth(addMonths(monthOf(v.spentOn), 1), Number(v.spentOn.slice(8)));
+  const nextTooEarly = splitFirst && monthOf(nextDate) <= monthOf(v.spentOn);
   const closingDay = lookups.accounts.find((a) => a.id === v.accountId)?.closingDay ?? null;
   const invoice = v.paymentMethod === 'credito' && closingDay && !v.recurring && !isRecurring ? billingMonth(v.spentOn, 'credito', closingDay).slice(0, 7) : null;
   const missing = {
@@ -133,6 +147,8 @@ export function ExpenseForm({
     category: !v.categoryId,
     method: !v.paymentMethod,
     member: !v.memberId,
+    firstAmount: splitFirst && !firstAmount,
+    nextOn: nextTooEarly,
   };
   const show = (key: keyof typeof missing) => missing[key] && (tried || Boolean(highlightMissing));
 
@@ -154,10 +170,10 @@ export function ExpenseForm({
         accountId: v.accountId,
         memberId: v.memberId!,
         paid: v.paid,
-        ...(mode === 'create' && installments > 1 && { installments }),
-        ...(mode === 'create' && installments <= 1 && v.recurring && { recurring: true }),
+        ...(canConvert && installments > 1 && { installments }),
+        ...(canConvert && installments <= 1 && v.recurring && { recurring: true }),
+        ...(splitFirst && { firstAmountCents: firstAmount!, nextOn: nextDate }),
         ...(mode === 'edit' && isRecurring && { applyToFuture }),
-        ...(mode === 'edit' && canBeRecurring && v.recurring && { recurring: true }),
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Erro ao salvar');
@@ -183,13 +199,17 @@ export function ExpenseForm({
         warn={tried && missing.description ? 'Informe uma descrição' : undefined}
       />
       <MoneyField
-        label={mode === 'create' && installments > 1 ? 'Valor total' : 'Valor'}
+        label={canConvert && installments > 1 ? 'Valor total' : splitFirst ? 'Valor mensal' : 'Valor'}
         cents={v.amountCents}
         onChange={(cents) => set('amountCents', cents)}
         highlight={tried && missing.amount}
         warn={tried && missing.amount ? 'Informe o valor' : undefined}
       />
-      <DateField label="Data da compra" value={v.spentOn} onChange={(iso) => set('spentOn', iso)} />
+      <DateField
+        label={splitFirst ? 'Data da primeira cobrança' : 'Data da compra'}
+        value={v.spentOn}
+        onChange={(iso) => set('spentOn', iso)}
+      />
       <Chips
         label="Categoria"
         options={categories}
@@ -222,7 +242,7 @@ export function ExpenseForm({
       />
       <SwitchRow label="Já foi pago" value={v.paid} onChange={(p) => set('paid', p)} />
 
-      {mode === 'create' && (
+      {canConvert && (
         <>
           <Field
             label="Parcelas"
@@ -241,7 +261,12 @@ export function ExpenseForm({
             }}
           />
           {installments <= 1 && (
-            <SwitchRow label="Recorrente" hint="Repete todo mês" value={v.recurring} onChange={(r) => set('recurring', r)} />
+            <SwitchRow
+              label={mode === 'create' ? 'Recorrente' : 'Lançamento recorrente'}
+              hint={mode === 'create' ? 'Repete todo mês' : 'Repete todo mês e vai para Recorrentes'}
+              value={v.recurring}
+              onChange={(r) => set('recurring', r)}
+            />
           )}
         </>
       )}
@@ -253,8 +278,40 @@ export function ExpenseForm({
           onChange={setApplyToFuture}
         />
       )}
-      {mode === 'edit' && canBeRecurring && (
-        <SwitchRow label="Lançamento recorrente" hint="Repete todo mês e vai para Recorrentes" value={v.recurring} onChange={(r) => set('recurring', r)} />
+      {canSplitFirst && (
+        <SwitchRow
+          label="Primeira cobrança diferente"
+          hint="Valor promocional, matrícula ou meses sem cobrança antes das mensalidades"
+          value={firstDifferent}
+          onChange={(on) => {
+            setFirstDifferent(on);
+            if (on && !firstAmount) setFirstAmount(v.amountCents);
+          }}
+        />
+      )}
+      {splitFirst && (
+        <>
+          <MoneyField
+            label="Valor da primeira cobrança"
+            cents={firstAmount}
+            onChange={setFirstAmount}
+            highlight={tried && missing.firstAmount}
+            warn={tried && missing.firstAmount ? 'Informe o valor da primeira cobrança' : undefined}
+          />
+          <DateField
+            label="Mensalidades a partir de"
+            value={nextDate}
+            onChange={setNextOn}
+            quick={false}
+            hint={
+              nextTooEarly
+                ? 'Escolha um mês depois da primeira cobrança'
+                : v.amountCents
+                  ? `${formatMoney(v.amountCents)} todo dia ${Number(nextDate.slice(8))} a partir de ${formatMonth(monthOf(nextDate)).toLowerCase()}`
+                  : undefined
+            }
+          />
+        </>
       )}
       {bottom}
       <ErrorNote>{error}</ErrorNote>
@@ -383,6 +440,104 @@ export function IncomeForm({
       {mode === 'edit' && canBeRecurring && (
         <SwitchRow label="Entrada recorrente" hint="Repete todo mês" value={v.recurring} onChange={(r) => set('recurring', r)} />
       )}
+      {bottom}
+      <ErrorNote>{error}</ErrorNote>
+    </FormShell>
+  );
+}
+
+export type InvestmentValues = {
+  description: string;
+  amountCents: number | null;
+  investedOn: string;
+  memberId: string | null;
+};
+
+export type InvestmentSubmit = {
+  description: string;
+  amountCents: number;
+  investedOn: string;
+  memberId: string | null;
+};
+
+export function InvestmentForm({
+  lookups,
+  initial,
+  mode,
+  layout,
+  header,
+  bottom,
+  onSubmit,
+  onCancel,
+}: {
+  lookups: Lookups;
+  initial: InvestmentValues;
+  mode: 'create' | 'edit';
+  layout: FormLayout;
+  header?: ReactNode;
+  bottom?: ReactNode;
+  onSubmit: (values: InvestmentSubmit) => Promise<void>;
+  onCancel?: () => void;
+}) {
+  const [v, setV] = useState(initial);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [tried, setTried] = useState(false);
+  const set = <K extends keyof InvestmentValues>(key: K, value: InvestmentValues[K]) => setV((s) => ({ ...s, [key]: value }));
+
+  const submit = async () => {
+    setTried(true);
+    if (!v.description.trim() || !v.amountCents) {
+      setError('Preencha descrição e valor');
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await onSubmit({
+        description: v.description.trim(),
+        amountCents: v.amountCents,
+        investedOn: v.investedOn,
+        memberId: v.memberId,
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Erro ao salvar');
+      setSaving(false);
+    }
+  };
+
+  return (
+    <FormShell
+      layout={layout}
+      header={header}
+      submitLabel={mode === 'create' ? 'Salvar investimento' : 'Salvar'}
+      saving={saving}
+      onSubmit={submit}
+      onCancel={onCancel}>
+      <Field
+        label="Descrição"
+        value={v.description}
+        onChangeText={(t) => set('description', t)}
+        placeholder="Ex.: Tesouro Selic"
+        highlight={tried && !v.description.trim()}
+        warn={tried && !v.description.trim() ? 'Informe uma descrição' : undefined}
+      />
+      <MoneyField
+        label="Valor investido"
+        cents={v.amountCents}
+        onChange={(cents) => set('amountCents', cents)}
+        highlight={tried && !v.amountCents}
+        warn={tried && !v.amountCents ? 'Informe o valor' : undefined}
+      />
+      <DateField label="Data" value={v.investedOn} onChange={(iso) => set('investedOn', iso)} />
+      <Chips
+        label="Quem investiu"
+        options={lookups.members.map((m) => ({ value: m.id, label: m.name }))}
+        value={v.memberId}
+        onChange={(id) => set('memberId', id)}
+        allowNone="Casa"
+      />
+      <Note icon="trending-up-outline">O valor sai do saldo previsto e do saldo com mês anterior.</Note>
       {bottom}
       <ErrorNote>{error}</ErrorNote>
     </FormShell>

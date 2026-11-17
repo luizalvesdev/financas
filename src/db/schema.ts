@@ -261,6 +261,28 @@ export const balanceResets = pgTable(
   ],
 );
 
+// Money moved into investments: it leaves the balance (forecast and carried over) like an expense,
+// but it is not spending, so it stays out of categories, cards and the paid/unpaid split.
+export const investments = pgTable(
+  'investments',
+  {
+    id: id(),
+    householdId: householdId(),
+    description: text('description').notNull(),
+    amountCents: money('amount_cents'),
+    investedOn: day('invested_on').notNull(),
+    memberId: uuid('member_id').references(() => members.id),
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
+    createdByMemberId: uuid('created_by_member_id').references(() => members.id),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    index('investments_invested_on_idx').on(t.householdId, t.investedOn),
+    check('investments_amount_positive', sql`${t.amountCents} > 0`),
+  ],
+);
+
 export const recurringIncomes = pgTable(
   'recurring_incomes',
   {

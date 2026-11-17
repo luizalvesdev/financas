@@ -9,6 +9,7 @@ import {
   expenses,
   incomes,
   installmentPlans,
+  investments,
   members,
   recurringExpenses,
   recurringIncomes,
@@ -23,8 +24,12 @@ import type {
   Income,
   IncomeInput,
   InstallmentPlan,
+  Investment,
+  InvestmentInput,
+  InvestmentsMonth,
   Lookups,
   MonthEntries,
+  PaymentMethod,
   PlanScheduleItem,
   PlanSummary,
   PlanUpdate,
@@ -196,8 +201,8 @@ function toIncome({ recurrenceActive, recurrenceEndsOn, ...row }: IncomeRow): In
   return { ...row, recurrenceContinues };
 }
 
-// Balance carried into `month`: incomes minus expenses (by billing month) from the month after the
-// latest reset before it, up to the month before it.
+// Balance carried into `month`: incomes minus expenses (by billing month) and investments from the
+// month after the latest reset before it, up to the month before it.
 function carryQueries(hid: string, month: string) {
   const db = getDb();
   const start = monthStart(month);
@@ -211,14 +216,28 @@ function carryQueries(hid: string, month: string) {
       .select({ total: sql<string>`coalesce(sum(${incomes.amountCents}), 0)` })
       .from(incomes)
       .where(and(eq(incomes.householdId, hid), isNull(incomes.deletedAt), lt(incomes.receivedOn, start), gte(incomes.receivedOn, from))),
+    db
+      .select({ total: sql<string>`coalesce(sum(${investments.amountCents}), 0)` })
+      .from(investments)
+      .where(
+        and(eq(investments.householdId, hid), isNull(investments.deletedAt), lt(investments.investedOn, start), gte(investments.investedOn, from)),
+      ),
   ] as const;
 }
+
+const investmentColumns = {
+  id: investments.id,
+  description: investments.description,
+  amountCents: investments.amountCents,
+  investedOn: investments.investedOn,
+  memberId: investments.memberId,
+};
 
 export async function listMonth(hid: string, month: string): Promise<MonthEntries> {
   await ensureRecurring(hid, month);
   const db = getDb();
   const start = monthStart(month);
-  const [expenseRows, incomeRows, expensesBefore, incomesBefore, resetRows] = await db.batch([
+  const [expenseRows, incomeRows, investmentRows, expensesBefore, incomesBefore, investmentsBefore, resetRows] = await db.batch([
     db
       .select(expenseColumns)
       .from(expenses)
@@ -239,6 +258,18 @@ export async function listMonth(hid: string, month: string): Promise<MonthEntrie
         ),
       )
       .orderBy(desc(incomes.receivedOn)),
+    db
+      .select(investmentColumns)
+      .from(investments)
+      .where(
+        and(
+          eq(investments.householdId, hid),
+          isNull(investments.deletedAt),
+          gte(investments.investedOn, monthStart(month)),
+          lte(investments.investedOn, monthEnd(month)),
+        ),
+      )
+      .orderBy(desc(investments.investedOn), desc(investments.createdAt)),
     ...carryQueries(hid, month),
     db
       .select({ month: balanceResets.month })
@@ -248,7 +279,8 @@ export async function listMonth(hid: string, month: string): Promise<MonthEntrie
   return {
     expenses: expenseRows.map(toExpense),
     incomes: incomeRows.map(toIncome),
-    carryOverCents: Number(incomesBefore[0].total) - Number(expensesBefore[0].total),
+    investments: investmentRows,
+    carryOverCents: Number(incomesBefore[0].total) - Number(expensesBefore[0].total) - Number(investmentsBefore[0].total),
     balanceReset: resetRows.length > 0,
   };
 }
@@ -325,19 +357,20 @@ export async function createExpense(input: ExpenseInput, me: Me): Promise<{ id: 
     const recurringId = crypto.randomUUID();
     const id = crypto.randomUUID();
     const month = monthOf(input.spentOn);
+    const dayOfMonth = Number((input.nextOn ?? input.spentOn).slice(8));
     await db.batch([
       db.insert(recurringExpenses).values({
         id: recurringId,
         description: input.description,
         amountCents: input.amountCents,
-        dayOfMonth: Number(input.spentOn.slice(8)),
+        dayOfMonth,
         startsOn: monthStart(month),
         ...common,
       }),
       db.insert(expenses).values({
         id,
         description: input.description,
-        amountCents: input.amountCents,
+        amountCents: input.firstAmountCents ?? input.amountCents,
         spentOn: input.spentOn,
         billingMonth: monthStart(month),
         ...common,
@@ -348,6 +381,9 @@ export async function createExpense(input: ExpenseInput, me: Me): Promise<{ id: 
         recurrenceMonth: monthStart(month),
         createdByMemberId: me.id,
       }),
+      ...(input.nextOn
+        ? [db.insert(expenses).values(monthsAfterFirst({ householdId: me.householdId, ...input }, recurringId, month, input.nextOn))]
+        : []),
     ]);
     return { id };
   }
@@ -369,14 +405,51 @@ export async function createExpense(input: ExpenseInput, me: Me): Promise<{ id: 
   return row;
 }
 
-export type ExpenseUpdate = Omit<ExpenseInput, 'installments' | 'rawText'> & {
+// For a recurrence whose first charge differs: the months between it and nextOn are stored as deleted
+// occurrences (so they are never generated) and nextOn gets the first regular charge.
+function monthsAfterFirst(
+  t: {
+    householdId: string;
+    description: string;
+    amountCents: number;
+    categoryId: string;
+    paymentMethod: PaymentMethod;
+    accountId: string | null;
+    memberId: string;
+  },
+  recurringExpenseId: string,
+  firstMonth: string,
+  nextOn: string,
+) {
+  const base = {
+    householdId: t.householdId,
+    description: t.description,
+    amountCents: t.amountCents,
+    categoryId: t.categoryId,
+    paymentMethod: t.paymentMethod,
+    accountId: t.accountId,
+    memberId: t.memberId,
+    source: 'recorrente' as const,
+    recurringExpenseId,
+  };
+  const day = Number(nextOn.slice(8));
+  const rows = [];
+  for (let m = addMonths(firstMonth, 1); m < monthOf(nextOn); m = addMonths(m, 1)) {
+    rows.push({ ...base, spentOn: dateInMonth(m, day), billingMonth: monthStart(m), recurrenceMonth: monthStart(m), deletedAt: new Date() });
+  }
+  const next = monthOf(nextOn);
+  rows.push({ ...base, spentOn: nextOn, billingMonth: monthStart(next), recurrenceMonth: monthStart(next), deletedAt: null });
+  return rows;
+}
+
+export type ExpenseUpdate = Omit<ExpenseInput, 'rawText'> & {
   applyToFuture?: boolean;
 };
 
 export async function updateExpense(hid: string, id: string, input: ExpenseUpdate): Promise<void> {
   const db = getDb();
   const current = await getExpense(hid, id);
-  const { applyToFuture, recurring, ...fields } = input;
+  const { applyToFuture, recurring, installments, firstAmountCents, nextOn, ...fields } = input;
   // Only re-bill when something that decides the invoice month changed, so imported rows keep theirs.
   const rebill =
     fields.spentOn !== current.spentOn ||
@@ -390,8 +463,13 @@ export async function updateExpense(hid: string, id: string, input: ExpenseUpdat
       : rebill
         ? billingMonth(fields.spentOn, fields.paymentMethod, await closingDayOf(hid, fields.accountId))
         : current.billingMonth;
+  if (installments && installments > 1 && !current.recurringExpenseId && !current.installmentPlanId) {
+    await convertToInstallments(hid, current.id, fields, installments);
+    return;
+  }
   if (makeRecurring) {
     // Turn this expense into the first occurrence of a new monthly template.
+    // With nextOn, it keeps its own amount and the template's amount starts at nextOn.
     const recurringId = crypto.randomUUID();
     const month = monthOf(fields.spentOn);
     await db.batch([
@@ -400,7 +478,7 @@ export async function updateExpense(hid: string, id: string, input: ExpenseUpdat
         householdId: hid,
         description: fields.description,
         amountCents: fields.amountCents,
-        dayOfMonth: Number(fields.spentOn.slice(8)),
+        dayOfMonth: Number((nextOn ?? fields.spentOn).slice(8)),
         categoryId: fields.categoryId,
         paymentMethod: fields.paymentMethod,
         accountId: fields.accountId,
@@ -409,8 +487,15 @@ export async function updateExpense(hid: string, id: string, input: ExpenseUpdat
       }),
       db
         .update(expenses)
-        .set({ ...fields, billingMonth: billing, recurringExpenseId: recurringId, recurrenceMonth: monthStart(month) })
+        .set({
+          ...fields,
+          amountCents: firstAmountCents ?? fields.amountCents,
+          billingMonth: billing,
+          recurringExpenseId: recurringId,
+          recurrenceMonth: monthStart(month),
+        })
         .where(eq(expenses.id, id)),
+      ...(nextOn ? [db.insert(expenses).values(monthsAfterFirst({ householdId: hid, ...fields }, recurringId, month, nextOn))] : []),
     ]);
     return;
   }
@@ -439,11 +524,16 @@ export async function updateExpense(hid: string, id: string, input: ExpenseUpdat
       .set({ ...template, ...(!current.recurrenceContinues && { active: true, endsOn: null }) })
       .where(and(eq(recurringExpenses.id, templateId), isNull(recurringExpenses.deletedAt))),
     // Occurrences dropped when the recurrence ended are removed for good so they can be generated again.
-    db
-      .delete(expenses)
-      .where(
-        and(eq(expenses.recurringExpenseId, templateId), gt(expenses.recurrenceMonth, month), sql`${expenses.deletedAt} is not null`),
-      ),
+    // While it continues, deleted ones are skipped months (or a first-charge gap) and must stay deleted.
+    ...(current.recurrenceContinues
+      ? []
+      : [
+          db
+            .delete(expenses)
+            .where(
+              and(eq(expenses.recurringExpenseId, templateId), gt(expenses.recurrenceMonth, month), sql`${expenses.deletedAt} is not null`),
+            ),
+        ]),
     // Paid occurrences keep their amount, but get the new name, category, card and person.
     db
       .update(expenses)
@@ -466,6 +556,62 @@ export async function updateExpense(hid: string, id: string, input: ExpenseUpdat
           isNull(expenses.deletedAt),
         ),
       ),
+  ]);
+}
+
+// A plain expense becomes installment 1 of a new plan (keeping its id); the others follow monthly.
+async function convertToInstallments(
+  hid: string,
+  id: string,
+  fields: Omit<ExpenseUpdate, 'applyToFuture' | 'recurring' | 'installments' | 'firstAmountCents' | 'nextOn'>,
+  count: number,
+): Promise<void> {
+  const db = getDb();
+  const planId = crypto.randomUUID();
+  const closingDay = await closingDayOf(hid, fields.accountId);
+  const purchaseMonth = monthOf(fields.spentOn);
+  const day = Number(fields.spentOn.slice(8));
+  const parts = splitInstallments(fields.amountCents, count);
+  const common = {
+    householdId: hid,
+    description: fields.description,
+    categoryId: fields.categoryId,
+    paymentMethod: fields.paymentMethod,
+    accountId: fields.accountId,
+    memberId: fields.memberId,
+  };
+  const rows = parts.slice(1).map((amountCents, i) => {
+    const spentOn = dateInMonth(addMonths(purchaseMonth, i + 1), day);
+    return {
+      ...common,
+      amountCents,
+      spentOn,
+      billingMonth: billingMonth(spentOn, fields.paymentMethod, closingDay),
+      paid: false,
+      source: 'parcela' as const,
+      installmentPlanId: planId,
+      installmentNumber: i + 2,
+    };
+  });
+  await db.batch([
+    db.insert(installmentPlans).values({
+      id: planId,
+      ...common,
+      totalCents: fields.amountCents,
+      installmentsCount: count,
+      purchasedOn: fields.spentOn,
+    }),
+    db
+      .update(expenses)
+      .set({
+        ...fields,
+        amountCents: parts[0],
+        billingMonth: billingMonth(fields.spentOn, fields.paymentMethod, closingDay),
+        installmentPlanId: planId,
+        installmentNumber: 1,
+      })
+      .where(eq(expenses.id, id)),
+    db.insert(expenses).values(rows),
   ]);
 }
 
@@ -619,6 +765,58 @@ export async function stopRecurringIncome(hid: string, id: string): Promise<void
   await endIncomeRecurrence(current.recurringIncomeId, monthStart(monthOf(current.receivedOn)));
 }
 
+export async function listInvestments(hid: string, month: string): Promise<InvestmentsMonth> {
+  const db = getDb();
+  const live = and(eq(investments.householdId, hid), isNull(investments.deletedAt));
+  const [rows, total] = await db.batch([
+    db
+      .select(investmentColumns)
+      .from(investments)
+      .where(and(live, gte(investments.investedOn, monthStart(month)), lte(investments.investedOn, monthEnd(month))))
+      .orderBy(desc(investments.investedOn), desc(investments.createdAt)),
+    db.select({ total: sql<string>`coalesce(sum(${investments.amountCents}), 0)` }).from(investments).where(live),
+  ]);
+  return {
+    investments: rows,
+    monthCents: rows.reduce((sum, r) => sum + r.amountCents, 0),
+    totalCents: Number(total[0].total),
+  };
+}
+
+export async function getInvestment(hid: string, id: string): Promise<Investment> {
+  const [row] = await getDb()
+    .select(investmentColumns)
+    .from(investments)
+    .where(and(eq(investments.id, id), eq(investments.householdId, hid), isNull(investments.deletedAt)));
+  return row ?? notFound();
+}
+
+export async function createInvestment(input: InvestmentInput, me: Me): Promise<{ id: string }> {
+  const [row] = await getDb()
+    .insert(investments)
+    .values({ ...input, householdId: me.householdId, createdByMemberId: me.id })
+    .returning({ id: investments.id });
+  return row;
+}
+
+export async function updateInvestment(hid: string, id: string, input: InvestmentInput): Promise<void> {
+  const rows = await getDb()
+    .update(investments)
+    .set(input)
+    .where(and(eq(investments.id, id), eq(investments.householdId, hid), isNull(investments.deletedAt)))
+    .returning({ id: investments.id });
+  if (!rows.length) notFound();
+}
+
+export async function deleteInvestment(hid: string, id: string): Promise<void> {
+  const rows = await getDb()
+    .update(investments)
+    .set({ deletedAt: new Date() })
+    .where(and(eq(investments.id, id), eq(investments.householdId, hid), isNull(investments.deletedAt)))
+    .returning({ id: investments.id });
+  if (!rows.length) notFound();
+}
+
 export async function getPlan(hid: string, id: string): Promise<InstallmentPlan> {
   const db = getDb();
   const [plan] = await db
@@ -686,8 +884,10 @@ export async function dashboard(hid: string, month: string): Promise<Dashboard> 
   const [
     expenseTotals,
     incomeTotals,
+    investmentTotals,
     expensesBefore,
     incomesBefore,
+    investmentsBefore,
     byCategory,
     byAccount,
     byMethod,
@@ -703,6 +903,12 @@ export async function dashboard(hid: string, month: string): Promise<Dashboard> 
       .select({ total: sql<string>`coalesce(sum(${incomes.amountCents}), 0)` })
       .from(incomes)
       .where(and(eq(incomes.householdId, hid), isNull(incomes.deletedAt), gte(incomes.receivedOn, start), lte(incomes.receivedOn, end))),
+    db
+      .select({ total: sql<string>`coalesce(sum(${investments.amountCents}), 0)` })
+      .from(investments)
+      .where(
+        and(eq(investments.householdId, hid), isNull(investments.deletedAt), gte(investments.investedOn, start), lte(investments.investedOn, end)),
+      ),
     ...carryQueries(hid, month),
     db.select({ key: expenses.categoryId, cents: total }).from(expenses).where(inMonth).groupBy(expenses.categoryId),
     db.select({ key: expenses.accountId, cents: total }).from(expenses).where(inMonth).groupBy(expenses.accountId),
@@ -721,6 +927,7 @@ export async function dashboard(hid: string, month: string): Promise<Dashboard> 
   const accountNames = new Map(accountRows.map((r) => [r.id, r.name]));
   const incomesCents = Number(incomeTotals[0].total);
   const expensesCents = Number(expenseTotals[0].total);
+  const investmentsCents = Number(investmentTotals[0].total);
   const spentByCategory = new Map(byCategory.map((r) => [r.key, Number(r.cents)]));
   const categoryIds = new Set([...spentByCategory.keys(), ...goals.keys()]);
 
@@ -729,8 +936,15 @@ export async function dashboard(hid: string, month: string): Promise<Dashboard> 
     incomesCents,
     expensesCents,
     paidCents: Number(expenseTotals[0].paid),
-    balanceCents: incomesCents - expensesCents,
-    accumulatedCents: Number(incomesBefore[0].total) - Number(expensesBefore[0].total) + incomesCents - expensesCents,
+    investmentsCents,
+    balanceCents: incomesCents - expensesCents - investmentsCents,
+    accumulatedCents:
+      Number(incomesBefore[0].total) -
+      Number(expensesBefore[0].total) -
+      Number(investmentsBefore[0].total) +
+      incomesCents -
+      expensesCents -
+      investmentsCents,
     byCategory: sorted(
       [...categoryIds]
         .filter((id) => spentByCategory.has(id) || !archived.has(id))

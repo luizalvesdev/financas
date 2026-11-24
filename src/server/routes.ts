@@ -1,7 +1,7 @@
 import { StatusError } from 'expo-server';
 import { z } from 'zod';
 
-import { parseEntry } from './ai';
+import { parseEntries } from './ai';
 import { createInvite, deleteAccount, login, logout, register, requireMember } from './auth';
 import * as finance from './finance';
 import { body, route } from './http';
@@ -36,7 +36,7 @@ const registerSchema = z.object({
 });
 const deleteAccountSchema = z.object({ password: z.string().min(1).max(200) });
 const loginSchema = z.object({ email: z.string().trim().min(3).max(200), password: z.string().min(1).max(200) });
-const parseSchema = z.object({ text: z.string().trim().min(2).max(500) });
+const parseSchema = z.object({ text: z.string().trim().min(2).max(2000) });
 const paidSchema = z.object({ ids: z.array(uuid).min(1).max(500), paid: z.boolean() });
 const settleSchema = z.object({ lastNumber: z.number().int().min(1) });
 const categoryCreate = z.object({ name: z.string().trim().min(1).max(60), goalCents });
@@ -106,7 +106,7 @@ const routes: Route[] = [
     handler: async (request) => {
       const me = await requireMember(request);
       const { text } = await body(request, parseSchema);
-      return json(await parseEntry(text, await finance.lookups(me)));
+      return json(await parseEntries(text, await finance.lookups(me)));
     },
   },
   {

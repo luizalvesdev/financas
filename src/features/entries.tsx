@@ -1,5 +1,5 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { type ReactNode, useMemo, useState } from 'react';
+import { type ReactNode, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, TextInput, View } from 'react-native';
 
 import {
@@ -42,39 +42,70 @@ const nameOf = (list: { id: string; name: string }[], id: string | null) =>
   id ? (list.find((x) => x.id === id)?.name ?? '') : '';
 const methodLabel = (m: string | null) => PAYMENT_METHODS.find((x) => x.value === m)?.label ?? '';
 
+type DraftItem = { key: number; draft: Draft; error?: string };
+
+const missingOf = (draft: Draft): string[] =>
+  draft.kind === 'income'
+    ? !draft.amountCents
+      ? ['valor']
+      : []
+    : [
+        !draft.amountCents && 'valor',
+        !draft.categoryId && 'categoria',
+        !draft.paymentMethod && 'forma de pagamento',
+        !draft.memberId && 'quem gastou',
+      ].filter((x): x is string => Boolean(x));
+
+async function saveDraft(draft: Draft) {
+  if (draft.kind === 'income') {
+    await api('/incomes', {
+      method: 'POST',
+      body: { description: draft.description, amountCents: draft.amountCents, receivedOn: draft.date, memberId: draft.memberId },
+    });
+  } else {
+    await api('/expenses', {
+      method: 'POST',
+      body: {
+        description: draft.description,
+        amountCents: draft.amountCents,
+        spentOn: draft.date,
+        categoryId: draft.categoryId,
+        paymentMethod: draft.paymentMethod,
+        accountId: draft.accountId,
+        memberId: draft.memberId,
+        paid: false,
+        installments: draft.installments ?? undefined,
+        rawText: draft.rawText,
+      },
+    });
+  }
+}
+
 function useQuickAdd() {
   const { changed } = useAppData();
   const actions = useEntryActions();
   const [text, setText] = useState('');
-  const [draft, setDraft] = useState<Draft | null>(null);
+  const [items, setItems] = useState<DraftItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const nextKey = useRef(0);
 
-  const missing = !draft
-    ? []
-    : draft.kind === 'income'
-      ? (['valor'].filter(() => !draft.amountCents) as string[])
-      : [
-          !draft.amountCents && 'valor',
-          !draft.categoryId && 'categoria',
-          !draft.paymentMethod && 'forma de pagamento',
-          !draft.memberId && 'quem gastou',
-        ].filter((x): x is string => Boolean(x));
+  const drop = (keys: number[]) => setItems((list) => list.filter((i) => !keys.includes(i.key)));
 
   return {
     text,
     setText,
-    draft,
+    items,
     error,
     busy,
-    missing,
     async parse() {
       if (text.trim().length < 2 || busy) return;
       setBusy(true);
       setError(null);
-      setDraft(null);
+      setItems([]);
       try {
-        setDraft(await api<Draft>('/parse', { method: 'POST', body: { text } }));
+        const drafts = await api<Draft[]>('/parse', { method: 'POST', body: { text } });
+        setItems(drafts.map((draft) => ({ key: nextKey.current++, draft })));
         setText('');
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Erro');
@@ -82,49 +113,49 @@ function useQuickAdd() {
         setBusy(false);
       }
     },
-    discard() {
-      setDraft(null);
+    discard(key: number) {
+      drop([key]);
     },
-    edit() {
-      if (!draft) return;
-      setDraft(null);
-      if (draft.kind === 'income') actions.newIncome(draft);
-      else actions.newExpense(draft);
+    discardAll() {
+      setItems([]);
     },
-    async confirm() {
-      if (!draft || missing.length) return;
+    edit(key: number) {
+      const item = items.find((i) => i.key === key);
+      if (!item) return;
+      drop([key]);
+      if (item.draft.kind === 'income') actions.newIncome(item.draft);
+      else actions.newExpense(item.draft);
+    },
+    async confirm(key: number) {
+      const item = items.find((i) => i.key === key);
+      if (!item || missingOf(item.draft).length || busy) return;
       setBusy(true);
       setError(null);
       try {
-        if (draft.kind === 'income') {
-          await api('/incomes', {
-            method: 'POST',
-            body: { description: draft.description, amountCents: draft.amountCents, receivedOn: draft.date, memberId: draft.memberId },
-          });
-        } else {
-          await api('/expenses', {
-            method: 'POST',
-            body: {
-              description: draft.description,
-              amountCents: draft.amountCents,
-              spentOn: draft.date,
-              categoryId: draft.categoryId,
-              paymentMethod: draft.paymentMethod,
-              accountId: draft.accountId,
-              memberId: draft.memberId,
-              paid: false,
-              installments: draft.installments ?? undefined,
-              rawText: draft.rawText,
-            },
-          });
-        }
-        setDraft(null);
+        await saveDraft(item.draft);
+        drop([key]);
         changed();
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Erro ao salvar');
       } finally {
         setBusy(false);
       }
+    },
+    async confirmAll() {
+      if (busy || items.some((i) => missingOf(i.draft).length)) return;
+      setBusy(true);
+      setError(null);
+      const failed = new Map<number, string>();
+      for (const item of items) {
+        try {
+          await saveDraft(item.draft);
+        } catch (e) {
+          failed.set(item.key, e instanceof Error ? e.message : 'Erro ao salvar');
+        }
+      }
+      setItems((list) => list.filter((i) => failed.has(i.key)).map((i) => ({ ...i, error: failed.get(i.key) })));
+      changed();
+      setBusy(false);
     },
   };
 }
@@ -155,10 +186,11 @@ function draftFields(draft: Draft, lookups: Lookups) {
   ];
 }
 
-function DraftCard({ q, lookups, wide }: { q: QuickAdd; lookups: Lookups; wide?: boolean }) {
+function DraftCard({ item, q, lookups, wide }: { item: DraftItem; q: QuickAdd; lookups: Lookups; wide?: boolean }) {
   const c = useColors();
-  const draft = q.draft!;
-  const pending = q.missing.length > 0;
+  const { draft } = item;
+  const missing = missingOf(draft);
+  const pending = missing.length > 0;
   const fields = draftFields(draft, lookups);
   const header = (
     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
@@ -195,13 +227,13 @@ function DraftCard({ q, lookups, wide }: { q: QuickAdd; lookups: Lookups; wide?:
   const buttons = (
     <View style={{ flexDirection: 'row', gap: space.sm, justifyContent: wide ? 'flex-end' : 'space-between' }}>
       <View style={!wide && { flex: 1 }}>
-        <Button title="Descartar" variant="outline" onPress={q.discard} size="sm" full={!wide} />
+        <Button title="Descartar" variant="outline" onPress={() => q.discard(item.key)} size="sm" full={!wide} />
       </View>
       <View style={!wide && { flex: 1 }}>
-        <Button title="Editar" variant="secondary" onPress={q.edit} size="sm" full={!wide} />
+        <Button title="Editar" variant="secondary" onPress={() => q.edit(item.key)} size="sm" full={!wide} />
       </View>
       <View style={!wide && { flex: 1 }}>
-        <Button title="Confirmar" onPress={q.confirm} disabled={pending} loading={q.busy} size="sm" full={!wide} />
+        <Button title="Confirmar" onPress={() => q.confirm(item.key)} disabled={pending} loading={q.busy} size="sm" full={!wide} />
       </View>
     </View>
   );
@@ -225,9 +257,40 @@ function DraftCard({ q, lookups, wide }: { q: QuickAdd; lookups: Lookups; wide?:
         </>
       )}
       {grid}
-      {pending && <Note tone="warn">Falta: {q.missing.join(', ')}. Toque em Editar</Note>}
+      {pending && <Note tone="warn">Falta: {missing.join(', ')}. Toque em Editar</Note>}
+      <ErrorNote>{item.error}</ErrorNote>
       {buttons}
     </Card>
+  );
+}
+
+function DraftList({ q, lookups, wide }: { q: QuickAdd; lookups: Lookups; wide?: boolean }) {
+  if (!q.items.length) return null;
+  const many = q.items.length > 1;
+  const pending = q.items.some((i) => missingOf(i.draft).length > 0);
+  return (
+    <View style={{ gap: space.md }}>
+      {q.items.map((item) => (
+        <DraftCard key={item.key} item={item} q={q} lookups={lookups} wide={wide} />
+      ))}
+      {many && (
+        <View style={{ flexDirection: 'row', gap: space.sm, justifyContent: wide ? 'flex-end' : 'space-between' }}>
+          <View style={!wide && { flex: 1 }}>
+            <Button title="Descartar todos" variant="outline" onPress={q.discardAll} size="sm" full={!wide} />
+          </View>
+          <View style={!wide && { flex: 1 }}>
+            <Button
+              title={`Confirmar todos (${q.items.length})`}
+              onPress={q.confirmAll}
+              disabled={pending}
+              loading={q.busy}
+              size="sm"
+              full={!wide}
+            />
+          </View>
+        </View>
+      )}
+    </View>
   );
 }
 
@@ -237,7 +300,7 @@ function QuickAddInput({ q, wide }: { q: QuickAdd; wide?: boolean }) {
     <TextInput
       value={q.text}
       onChangeText={q.setText}
-      placeholder={wide ? 'Lançar com IA — ex.: gastei 10 reais hoje num salgado no nubank do Luiz' : 'Ex.: gastei 10 reais hoje num salgado no nubank do Luiz'}
+      placeholder={wide ? 'Lançar com IA — ex.: 10 reais lanche pf manu; 20 reais uber pf luiz' : 'Ex.: gastei 10 reais hoje num salgado no nubank do Luiz'}
       placeholderTextColor={c.text3}
       multiline={!wide}
       editable={!q.busy}
@@ -284,7 +347,7 @@ function QuickAddInput({ q, wide }: { q: QuickAdd; wide?: boolean }) {
           </View>
         </>
       )}
-      {q.busy && !q.draft && (
+      {q.busy && !q.items.length && (
         <View style={[styles.parsing, { backgroundColor: c.primaryBg }]}>
           <ActivityIndicator size="small" color={c.primaryText} />
           <Txt size={14} weight={600} color={c.primaryText}>
@@ -647,7 +710,7 @@ export function MobileEntries() {
       <Screen>
         <MonthSwitcher month={month} onShift={shiftMonth} />
         <QuickAddInput q={q} />
-        {q.draft && <DraftCard q={q} lookups={lookups} />}
+        <DraftList q={q} lookups={lookups} />
 
         {!data ? (
           <View style={{ gap: space.md }}>
@@ -976,7 +1039,7 @@ export function DesktopEntries() {
   return (
     <DesktopPage title="Lançamentos" footer={footer}>
       <QuickAddInput q={q} wide />
-      {q.draft && lookups && <DraftCard q={q} lookups={lookups} wide />}
+      {lookups && <DraftList q={q} lookups={lookups} wide />}
 
       <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.md }}>
         {loading ? (

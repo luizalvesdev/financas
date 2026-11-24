@@ -43,6 +43,7 @@ Regras:
 - date: data no formato AAAA-MM-DD. Interprete "hoje", "ontem", "anteontem", dias da semana e "dia 11" (mês atual, ou o anterior se ainda não chegou) a partir da data de hoje informada. Sem data na frase, use hoje.
 - category, account, member, payment_method: escolha somente entre as opções listadas. Se não der para deduzir, use null. Não invente.
 - Cartão de crédito citado ("no nubank", "no crédito") implica payment_method "credito", salvo se a frase disser pix ou débito.
+- "pf" e "pj" (pessoa física / jurídica) na frase, com ou sem nome, indicam o cartão/conta: "lanche pf manu" = conta "... PF ..." da Manu. Escolha a conta cujo nome combina (ex.: "Nubank PF Manu") e use o dono dela como member.
 - member é quem gastou ou recebeu. "do Luiz", "da Manu", "eu" (= quem está escrevendo) indicam a pessoa.`;
 
 function buildSchema(lookups: Lookups) {
@@ -138,4 +139,38 @@ export async function parseEntry(text: string, lookups: Lookups): Promise<Draft>
     installments,
     rawText: text,
   };
+}
+
+const MAX_ENTRIES = 10;
+
+// Several entries in one text, separated by ";". One parse per piece so each keeps its own raw text.
+export async function parseEntries(text: string, lookups: Lookups): Promise<Draft[]> {
+  const parts = text
+    .split(';')
+    .map((p) => p.trim())
+    .filter((p) => p.length >= 2);
+  if (!parts.length) throw new StatusError(422, 'Não entendi, tente escrever de outro jeito');
+  if (parts.length > MAX_ENTRIES) throw new StatusError(422, `No máximo ${MAX_ENTRIES} lançamentos por vez`);
+
+  const results = await Promise.allSettled(parts.map((part) => parseEntry(part, lookups)));
+  const firstError = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+  if (firstError && results.every((r) => r.status === 'rejected')) throw firstError.reason;
+
+  // A piece the AI could not read comes back empty (amount missing) so it can be fixed by hand.
+  return results.map((r, i) =>
+    r.status === 'fulfilled'
+      ? r.value
+      : {
+          kind: 'expense',
+          description: parts[i].slice(0, 60),
+          amountCents: null,
+          date: today(),
+          categoryId: null,
+          paymentMethod: null,
+          accountId: null,
+          memberId: lookups.me.id,
+          installments: null,
+          rawText: parts[i],
+        },
+  );
 }

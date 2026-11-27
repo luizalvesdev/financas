@@ -87,7 +87,7 @@ export type InvestmentInput = {
 export type InvestmentsMonth = {
   investments: Investment[];
   monthCents: number;
-  // Everything invested up to today, across all months (future recurring occurrences excluded).
+  // Everything invested up to the end of the month, counting recurring months not opened yet.
   totalCents: number;
 };
 

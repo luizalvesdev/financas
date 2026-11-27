@@ -3,7 +3,7 @@ import { Pressable, StyleSheet, View } from 'react-native';
 
 import { Button, EmptyState, ErrorNote, MonthSwitcher, Screen, Skeleton, Stat, Txt } from '@/components/ui';
 import { useAppData, useRemote } from '@/lib/data';
-import { formatDayHeader, formatMoney, formatShortDate } from '@/lib/format';
+import { formatDayHeader, formatMoney, formatMonth, formatShortDate } from '@/lib/format';
 import { radius, space, useColors, useIsDesktop } from '@/lib/theme';
 import type { Investment, InvestmentsMonth, Lookups } from '@/shared/types';
 
@@ -27,7 +27,7 @@ function Content() {
     <>
       <View style={styles.stats}>
         <Stat label="Investido no mês" cents={data?.monthCents ?? 0} icon="trending-up-outline" />
-        <Stat label="Total investido" cents={data?.totalCents ?? 0} icon="wallet-outline" />
+        <Stat label={`Total investido até ${formatMonth(month).toLowerCase()}`} cents={data?.totalCents ?? 0} icon="wallet-outline" />
       </View>
       <ErrorNote>{error}</ErrorNote>
       {!data || !lookups ? (

@@ -800,24 +800,49 @@ export async function stopRecurringIncome(hid: string, id: string): Promise<void
   await endIncomeRecurrence(current.recurringIncomeId, monthStart(monthOf(current.receivedOn)));
 }
 
+// Recurring occurrences only exist for months that were opened, so the total adds the months of each
+// live template that have no row yet (a deleted occurrence still has its row, so it is not counted).
 export async function listInvestments(hid: string, month: string): Promise<InvestmentsMonth> {
   await ensureRecurring(hid, month);
   const db = getDb();
   const live = and(eq(investments.householdId, hid), isNull(investments.deletedAt));
-  const [rows, total] = await db.batch([
+  const end = monthEnd(month);
+  const [rows, total, templates, occurrences] = await db.batch([
     selectInvestments()
-      .where(and(live, gte(investments.investedOn, monthStart(month)), lte(investments.investedOn, monthEnd(month))))
+      .where(and(live, gte(investments.investedOn, monthStart(month)), lte(investments.investedOn, end)))
       .orderBy(desc(investments.investedOn), desc(investments.createdAt)),
-    // Up to today: recurring occurrences of months ahead are generated as soon as those months are opened.
     db
       .select({ total: sql<string>`coalesce(sum(${investments.amountCents}), 0)` })
       .from(investments)
-      .where(and(live, lte(investments.investedOn, today()))),
+      .where(and(live, lte(investments.investedOn, end))),
+    db
+      .select({ id: recurringInvestments.id, amountCents: recurringInvestments.amountCents, startsOn: recurringInvestments.startsOn, endsOn: recurringInvestments.endsOn })
+      .from(recurringInvestments)
+      .where(
+        and(
+          eq(recurringInvestments.householdId, hid),
+          eq(recurringInvestments.active, true),
+          isNull(recurringInvestments.deletedAt),
+          lte(recurringInvestments.startsOn, end),
+        ),
+      ),
+    db
+      .select({ templateId: investments.recurringInvestmentId, month: investments.recurrenceMonth })
+      .from(investments)
+      .where(and(eq(investments.householdId, hid), sql`${investments.recurringInvestmentId} is not null`, lte(investments.recurrenceMonth, end))),
   ]);
+  const existing = new Set(occurrences.map((o) => `${o.templateId}:${o.month}`));
+  let pendingCents = 0;
+  for (const t of templates) {
+    const last = t.endsOn && t.endsOn < end ? monthOf(t.endsOn) : month;
+    for (let m = monthOf(t.startsOn); m <= last; m = addMonths(m, 1)) {
+      if (!existing.has(`${t.id}:${monthStart(m)}`)) pendingCents += t.amountCents;
+    }
+  }
   return {
     investments: rows.map(toInvestment),
     monthCents: rows.reduce((sum, r) => sum + r.amountCents, 0),
-    totalCents: Number(total[0].total),
+    totalCents: Number(total[0].total) + pendingCents,
   };
 }
 

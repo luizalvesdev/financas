@@ -13,7 +13,8 @@ import {
   goalCents,
   incomeCreate,
   incomeUpdate,
-  investmentInput,
+  investmentCreate,
+  investmentUpdate,
   month,
   planUpdate,
   uuid,
@@ -51,7 +52,7 @@ const accountCreate = z.object({
   closingDay: closingDay.default(null),
 });
 const accountUpdate = z.object({ closingDay });
-const recurringKind = z.enum(['expense', 'income']);
+const recurringKind = z.enum(['expense', 'income', 'investment']);
 const recurringUpdate = z.object({ amountCents: cents.optional(), startsOn: month.optional(), active: z.boolean().optional() });
 
 const ID = '([^/]+)';
@@ -200,7 +201,7 @@ const routes: Route[] = [
     pattern: /^investments$/,
     handler: async (request) => {
       const me = await requireMember(request);
-      const input = await body(request, investmentInput);
+      const input = await body(request, investmentCreate);
       await finance.assertReferences(me.householdId, input);
       return json(await finance.createInvestment(input, me), 201);
     },
@@ -215,7 +216,7 @@ const routes: Route[] = [
     pattern: new RegExp(`^investments/${ID}$`),
     handler: async (request, [id]) => {
       const hid = await hidOf(request);
-      const input = await body(request, investmentInput);
+      const input = await body(request, investmentUpdate);
       await finance.assertReferences(hid, input);
       await finance.updateInvestment(hid, uuid.parse(id), input);
       return ok();
@@ -225,6 +226,11 @@ const routes: Route[] = [
     method: 'DELETE',
     pattern: new RegExp(`^investments/${ID}$`),
     handler: async (request, [id]) => (await finance.deleteInvestment(await hidOf(request), uuid.parse(id)), ok()),
+  },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^investments/${ID}/stop-recurring$`),
+    handler: async (request, [id]) => (await finance.stopRecurringInvestment(await hidOf(request), uuid.parse(id)), ok()),
   },
   {
     method: 'GET',

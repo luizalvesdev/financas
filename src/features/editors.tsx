@@ -278,7 +278,7 @@ export function NewInvestment(props: EditorProps) {
       layout={props.layout}
       header={props.header}
       onCancel={props.onCancel}
-      initial={{ description: '', amountCents: null, investedOn: today(), memberId: lookups.me.id }}
+      initial={{ description: '', amountCents: null, investedOn: today(), memberId: lookups.me.id, recurring: false }}
       onSubmit={async (values) => {
         await api('/investments', { method: 'POST', body: values });
         changed();
@@ -297,6 +297,16 @@ export function EditInvestment({ id, ...props }: EditorProps & { id: string }) {
   if (error) return <View style={{ padding: space.lg }}><ErrorNote>{error}</ErrorNote></View>;
   if (!lookups || !investment) return <Spinner />;
 
+  const run = async (action: () => Promise<void>) => {
+    try {
+      await action();
+      changed();
+      props.onDone();
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : 'Erro');
+    }
+  };
+
   return (
     <InvestmentForm
       key={investment.id}
@@ -305,28 +315,38 @@ export function EditInvestment({ id, ...props }: EditorProps & { id: string }) {
       layout={props.layout}
       header={props.header}
       onCancel={props.onCancel}
+      isRecurring={Boolean(investment.recurringInvestmentId)}
+      recurrenceContinues={investment.recurrenceContinues}
+      canBeRecurring={!investment.recurringInvestmentId}
       initial={{
         description: investment.description,
         amountCents: investment.amountCents,
         investedOn: investment.investedOn,
         memberId: investment.memberId,
+        recurring: false,
       }}
       bottom={
         <View style={{ gap: 10 }}>
           <ErrorNote>{actionError}</ErrorNote>
+          {investment.recurringInvestmentId && (
+            <Button
+              title="Parar recorrência"
+              variant="outline"
+              icon="repeat"
+              onPress={async () => {
+                if (await ask({ title: 'Parar recorrência?', message: 'Este mês fica; os próximos deixam de ser gerados.', action: 'Parar' })) {
+                  await run(() => api(`/investments/${investment.id}/stop-recurring`, { method: 'POST' }));
+                }
+              }}
+            />
+          )}
           <Button
             title="Apagar"
             variant="danger"
             icon="trash-outline"
             onPress={async () => {
               if (await ask({ title: 'Apagar investimento?', message: `"${investment.description}" será apagado.`, action: 'Apagar' })) {
-                try {
-                  await api(`/investments/${investment.id}`, { method: 'DELETE' });
-                  changed();
-                  props.onDone();
-                } catch (e) {
-                  setActionError(e instanceof Error ? e.message : 'Erro');
-                }
+                await run(() => api(`/investments/${investment.id}`, { method: 'DELETE' }));
               }
             }}
           />

@@ -13,6 +13,7 @@ import {
   members,
   recurringExpenses,
   recurringIncomes,
+  recurringInvestments,
 } from '@/db/schema';
 import { billingMonth } from '@/shared/billing';
 import { addMonths, dateInMonth, monthEnd, monthOf, monthStart, today } from '@/shared/dates';
@@ -34,6 +35,7 @@ import type {
   PlanSummary,
   PlanUpdate,
   Recurring,
+  RecurringKind,
 } from '@/shared/types';
 
 import type { Me } from './auth';
@@ -86,7 +88,7 @@ export async function lookups(me: Me): Promise<Lookups> {
   };
 }
 
-function activeIn<T extends typeof recurringExpenses | typeof recurringIncomes>(hid: string, table: T, month: string) {
+function activeIn<T extends typeof recurringExpenses | typeof recurringIncomes | typeof recurringInvestments>(hid: string, table: T, month: string) {
   return and(
     eq(table.householdId, hid),
     eq(table.active, true),
@@ -107,9 +109,10 @@ async function closingDayOf(hid: string, accountId: string | null): Promise<numb
 
 export async function ensureRecurring(hid: string, month: string): Promise<void> {
   const db = getDb();
-  const [expenseTemplates, incomeTemplates] = await db.batch([
+  const [expenseTemplates, incomeTemplates, investmentTemplates] = await db.batch([
     db.select().from(recurringExpenses).where(activeIn(hid, recurringExpenses, month)),
     db.select().from(recurringIncomes).where(activeIn(hid, recurringIncomes, month)),
+    db.select().from(recurringInvestments).where(activeIn(hid, recurringInvestments, month)),
   ]);
   // Recurring expenses count in their own month, whatever the card's closing day.
   const expenseValues = expenseTemplates.map((t) => ({
@@ -145,9 +148,24 @@ export async function ensureRecurring(hid: string, month: string): Promise<void>
         )
         .onConflictDoNothing()
     : null;
-  if (expenseInsert && incomeInsert) await db.batch([expenseInsert, incomeInsert]);
-  else if (expenseInsert) await expenseInsert;
-  else if (incomeInsert) await incomeInsert;
+  const investmentInsert = investmentTemplates.length
+    ? db
+        .insert(investments)
+        .values(
+          investmentTemplates.map((t) => ({
+            householdId: hid,
+            description: t.description,
+            amountCents: t.amountCents,
+            investedOn: dateInMonth(month, t.dayOfMonth),
+            memberId: t.memberId,
+            recurringInvestmentId: t.id,
+            recurrenceMonth,
+          })),
+        )
+        .onConflictDoNothing()
+    : null;
+  const inserts = [expenseInsert, incomeInsert, investmentInsert].filter((q) => q !== null);
+  if (inserts.length) await db.batch(inserts as [(typeof inserts)[number], ...(typeof inserts)[number][]]);
 }
 
 const expenseColumns = {
@@ -231,7 +249,26 @@ const investmentColumns = {
   amountCents: investments.amountCents,
   investedOn: investments.investedOn,
   memberId: investments.memberId,
+  recurringInvestmentId: investments.recurringInvestmentId,
+  recurrenceActive: recurringInvestments.active,
+  recurrenceEndsOn: recurringInvestments.endsOn,
 };
+
+type InvestmentRow = Omit<Investment, 'recurrenceContinues'> & { recurrenceActive: boolean | null; recurrenceEndsOn: string | null };
+
+function toInvestment({ recurrenceActive, recurrenceEndsOn, ...row }: InvestmentRow): Investment {
+  const recurrenceContinues = Boolean(
+    row.recurringInvestmentId && recurrenceActive && (recurrenceEndsOn === null || recurrenceEndsOn > monthEnd(monthOf(row.investedOn))),
+  );
+  return { ...row, recurrenceContinues };
+}
+
+function selectInvestments() {
+  return getDb()
+    .select(investmentColumns)
+    .from(investments)
+    .leftJoin(recurringInvestments, eq(recurringInvestments.id, investments.recurringInvestmentId));
+}
 
 export async function listMonth(hid: string, month: string): Promise<MonthEntries> {
   await ensureRecurring(hid, month);
@@ -258,9 +295,7 @@ export async function listMonth(hid: string, month: string): Promise<MonthEntrie
         ),
       )
       .orderBy(desc(incomes.receivedOn)),
-    db
-      .select(investmentColumns)
-      .from(investments)
+    selectInvestments()
       .where(
         and(
           eq(investments.householdId, hid),
@@ -279,7 +314,7 @@ export async function listMonth(hid: string, month: string): Promise<MonthEntrie
   return {
     expenses: expenseRows.map(toExpense),
     incomes: incomeRows.map(toIncome),
-    investments: investmentRows,
+    investments: investmentRows.map(toInvestment),
     carryOverCents: Number(incomesBefore[0].total) - Number(expensesBefore[0].total) - Number(investmentsBefore[0].total),
     balanceReset: resetRows.length > 0,
   };
@@ -766,46 +801,136 @@ export async function stopRecurringIncome(hid: string, id: string): Promise<void
 }
 
 export async function listInvestments(hid: string, month: string): Promise<InvestmentsMonth> {
+  await ensureRecurring(hid, month);
   const db = getDb();
   const live = and(eq(investments.householdId, hid), isNull(investments.deletedAt));
   const [rows, total] = await db.batch([
-    db
-      .select(investmentColumns)
-      .from(investments)
+    selectInvestments()
       .where(and(live, gte(investments.investedOn, monthStart(month)), lte(investments.investedOn, monthEnd(month))))
       .orderBy(desc(investments.investedOn), desc(investments.createdAt)),
-    db.select({ total: sql<string>`coalesce(sum(${investments.amountCents}), 0)` }).from(investments).where(live),
+    // Up to today: recurring occurrences of months ahead are generated as soon as those months are opened.
+    db
+      .select({ total: sql<string>`coalesce(sum(${investments.amountCents}), 0)` })
+      .from(investments)
+      .where(and(live, lte(investments.investedOn, today()))),
   ]);
   return {
-    investments: rows,
+    investments: rows.map(toInvestment),
     monthCents: rows.reduce((sum, r) => sum + r.amountCents, 0),
     totalCents: Number(total[0].total),
   };
 }
 
 export async function getInvestment(hid: string, id: string): Promise<Investment> {
-  const [row] = await getDb()
-    .select(investmentColumns)
-    .from(investments)
-    .where(and(eq(investments.id, id), eq(investments.householdId, hid), isNull(investments.deletedAt)));
-  return row ?? notFound();
+  const [row] = await selectInvestments().where(
+    and(eq(investments.id, id), eq(investments.householdId, hid), isNull(investments.deletedAt)),
+  );
+  return row ? toInvestment(row) : notFound();
 }
 
 export async function createInvestment(input: InvestmentInput, me: Me): Promise<{ id: string }> {
-  const [row] = await getDb()
-    .insert(investments)
-    .values({ ...input, householdId: me.householdId, createdByMemberId: me.id })
-    .returning({ id: investments.id });
-  return row;
+  const db = getDb();
+  const { recurring, ...fields } = input;
+  const id = crypto.randomUUID();
+  const values = { ...fields, id, householdId: me.householdId, createdByMemberId: me.id };
+  if (!recurring) {
+    await db.insert(investments).values(values);
+    return { id };
+  }
+  const recurringId = crypto.randomUUID();
+  const month = monthStart(monthOf(fields.investedOn));
+  await db.batch([
+    db.insert(recurringInvestments).values({
+      id: recurringId,
+      householdId: me.householdId,
+      description: fields.description,
+      amountCents: fields.amountCents,
+      dayOfMonth: Number(fields.investedOn.slice(8)),
+      memberId: fields.memberId,
+      startsOn: month,
+    }),
+    db.insert(investments).values({ ...values, recurringInvestmentId: recurringId, recurrenceMonth: month }),
+  ]);
+  return { id };
 }
 
-export async function updateInvestment(hid: string, id: string, input: InvestmentInput): Promise<void> {
-  const rows = await getDb()
-    .update(investments)
-    .set(input)
-    .where(and(eq(investments.id, id), eq(investments.householdId, hid), isNull(investments.deletedAt)))
-    .returning({ id: investments.id });
-  if (!rows.length) notFound();
+export type InvestmentUpdate = InvestmentInput & { applyToFuture?: boolean };
+
+export async function updateInvestment(hid: string, id: string, input: InvestmentUpdate): Promise<void> {
+  const db = getDb();
+  const current = await getInvestment(hid, id);
+  const { applyToFuture, recurring, ...fields } = input;
+
+  if (recurring && !current.recurringInvestmentId) {
+    // Turn this investment into the first occurrence of a new monthly template.
+    const recurringId = crypto.randomUUID();
+    const month = monthStart(monthOf(fields.investedOn));
+    await db.batch([
+      db.insert(recurringInvestments).values({
+        id: recurringId,
+        householdId: hid,
+        description: fields.description,
+        amountCents: fields.amountCents,
+        dayOfMonth: Number(fields.investedOn.slice(8)),
+        memberId: fields.memberId,
+        startsOn: month,
+      }),
+      db.update(investments).set({ ...fields, recurringInvestmentId: recurringId, recurrenceMonth: month }).where(eq(investments.id, id)),
+    ]);
+    return;
+  }
+  await db.update(investments).set(fields).where(eq(investments.id, id));
+
+  // The toggle is the recurrence's state: on keeps (or restarts) it from this month, off ends it here.
+  const templateId = current.recurringInvestmentId;
+  if (!templateId || applyToFuture === undefined) return;
+  const month = monthStart(monthOf(current.investedOn));
+  if (!applyToFuture) {
+    if (current.recurrenceContinues) await endInvestmentRecurrence(templateId, month);
+    return;
+  }
+  await db.batch([
+    db
+      .update(recurringInvestments)
+      .set({
+        description: fields.description,
+        amountCents: fields.amountCents,
+        dayOfMonth: Number(fields.investedOn.slice(8)),
+        memberId: fields.memberId,
+        ...(!current.recurrenceContinues && { active: true, endsOn: null }),
+      })
+      .where(and(eq(recurringInvestments.id, templateId), isNull(recurringInvestments.deletedAt))),
+    // Occurrences dropped when the recurrence ended are removed for good so they can be generated again.
+    ...(current.recurrenceContinues
+      ? []
+      : [
+          db
+            .delete(investments)
+            .where(
+              and(
+                eq(investments.recurringInvestmentId, templateId),
+                gt(investments.recurrenceMonth, month),
+                sql`${investments.deletedAt} is not null`,
+              ),
+            ),
+        ]),
+    db
+      .update(investments)
+      .set({ description: fields.description, amountCents: fields.amountCents, memberId: fields.memberId })
+      .where(and(eq(investments.recurringInvestmentId, templateId), gt(investments.recurrenceMonth, month), isNull(investments.deletedAt))),
+  ]);
+}
+
+// Ends the template at the end of `month` and removes the occurrences after it.
+async function endInvestmentRecurrence(templateId: string, month: string): Promise<void> {
+  const db = getDb();
+  await db.batch([
+    db.update(recurringInvestments).set({ endsOn: monthEnd(monthOf(month)) }).where(eq(recurringInvestments.id, templateId)),
+    db
+      .update(investments)
+      .set({ deletedAt: new Date() })
+      .where(and(eq(investments.recurringInvestmentId, templateId), gt(investments.recurrenceMonth, month), isNull(investments.deletedAt))),
+  ]);
 }
 
 export async function deleteInvestment(hid: string, id: string): Promise<void> {
@@ -815,6 +940,12 @@ export async function deleteInvestment(hid: string, id: string): Promise<void> {
     .where(and(eq(investments.id, id), eq(investments.householdId, hid), isNull(investments.deletedAt)))
     .returning({ id: investments.id });
   if (!rows.length) notFound();
+}
+
+export async function stopRecurringInvestment(hid: string, id: string): Promise<void> {
+  const current = await getInvestment(hid, id);
+  if (!current.recurringInvestmentId) throw new StatusError(400, 'Este investimento não é recorrente');
+  await endInvestmentRecurrence(current.recurringInvestmentId, monthStart(monthOf(current.investedOn)));
 }
 
 export async function getPlan(hid: string, id: string): Promise<InstallmentPlan> {
@@ -1143,9 +1274,14 @@ export async function deletePlan(hid: string, id: string): Promise<void> {
 
 export async function listRecurring(hid: string): Promise<Recurring[]> {
   const db = getDb();
-  const [expenseRows, incomeRows] = await db.batch([
+  const [expenseRows, incomeRows, investmentRows] = await db.batch([
     db.select().from(recurringExpenses).where(and(eq(recurringExpenses.householdId, hid), isNull(recurringExpenses.deletedAt))).orderBy(asc(recurringExpenses.dayOfMonth)),
     db.select().from(recurringIncomes).where(and(eq(recurringIncomes.householdId, hid), isNull(recurringIncomes.deletedAt))).orderBy(asc(recurringIncomes.dayOfMonth)),
+    db
+      .select()
+      .from(recurringInvestments)
+      .where(and(eq(recurringInvestments.householdId, hid), isNull(recurringInvestments.deletedAt)))
+      .orderBy(asc(recurringInvestments.dayOfMonth)),
   ]);
   return [
     ...expenseRows.map((r) => ({
@@ -1161,9 +1297,12 @@ export async function listRecurring(hid: string): Promise<Recurring[]> {
       startsOn: r.startsOn,
       active: r.active && r.endsOn === null,
     })),
-    ...incomeRows.map((r) => ({
+    ...[
+      ...incomeRows.map((r) => ({ ...r, kind: 'income' as const })),
+      ...investmentRows.map((r) => ({ ...r, kind: 'investment' as const })),
+    ].map((r) => ({
       id: r.id,
-      kind: 'income' as const,
+      kind: r.kind,
       description: r.description,
       amountCents: r.amountCents,
       dayOfMonth: r.dayOfMonth,
@@ -1182,7 +1321,7 @@ export async function listRecurring(hid: string): Promise<Recurring[]> {
 // the missing months appear when they are opened.
 export async function updateRecurring(
   hid: string,
-  kind: 'expense' | 'income',
+  kind: RecurringKind,
   id: string,
   changes: { amountCents?: number; startsOn?: string },
 ): Promise<void> {
@@ -1212,6 +1351,22 @@ export async function updateRecurring(
         .set({ amountCents: changes.amountCents })
         .where(and(eq(expenses.recurringExpenseId, id), gt(expenses.recurrenceMonth, after), eq(expenses.paid, false), isNull(expenses.deletedAt)));
     }
+  } else if (kind === 'investment') {
+    const [row] = await db
+      .update(recurringInvestments)
+      .set(set)
+      .where(and(eq(recurringInvestments.id, id), eq(recurringInvestments.householdId, hid), isNull(recurringInvestments.deletedAt)))
+      .returning({ id: recurringInvestments.id });
+    if (!row) notFound();
+    if (startsOn) {
+      await db.delete(investments).where(and(eq(investments.recurringInvestmentId, id), lt(investments.recurrenceMonth, startsOn)));
+    }
+    if (changes.amountCents !== undefined) {
+      await db
+        .update(investments)
+        .set({ amountCents: changes.amountCents })
+        .where(and(eq(investments.recurringInvestmentId, id), gt(investments.recurrenceMonth, after), isNull(investments.deletedAt)));
+    }
   } else {
     const [row] = await db.update(recurringIncomes).set(set).where(and(eq(recurringIncomes.id, id), eq(recurringIncomes.householdId, hid), isNull(recurringIncomes.deletedAt))).returning({ id: recurringIncomes.id });
     if (!row) notFound();
@@ -1229,7 +1384,7 @@ export async function updateRecurring(
   }
 }
 
-export async function setRecurringActive(hid: string, kind: 'expense' | 'income', id: string, active: boolean): Promise<void> {
+export async function setRecurringActive(hid: string, kind: RecurringKind, id: string, active: boolean): Promise<void> {
   const db = getDb();
   const month = monthOf(today());
   const endsOn = active ? null : monthEnd(month);
@@ -1245,6 +1400,19 @@ export async function setRecurringActive(hid: string, kind: 'expense' | 'income'
         .update(expenses)
         .set({ deletedAt: new Date() })
         .where(and(eq(expenses.recurringExpenseId, id), gt(expenses.recurrenceMonth, monthStart(month)), isNull(expenses.deletedAt)));
+    }
+  } else if (kind === 'investment') {
+    const [row] = await db
+      .update(recurringInvestments)
+      .set({ active: true, endsOn })
+      .where(and(eq(recurringInvestments.id, id), eq(recurringInvestments.householdId, hid), isNull(recurringInvestments.deletedAt)))
+      .returning({ id: recurringInvestments.id });
+    if (!row) notFound();
+    if (!active) {
+      await db
+        .update(investments)
+        .set({ deletedAt: new Date() })
+        .where(and(eq(investments.recurringInvestmentId, id), gt(investments.recurrenceMonth, monthStart(month)), isNull(investments.deletedAt)));
     }
   } else {
     const [row] = await db
@@ -1264,7 +1432,7 @@ export async function setRecurringActive(hid: string, kind: 'expense' | 'income'
 
 // Soft-deletes the template and its entries from this month on, so it leaves the list and is never
 // generated again. Paid entries and earlier months stay as history.
-export async function deleteRecurring(hid: string, kind: 'expense' | 'income', id: string): Promise<void> {
+export async function deleteRecurring(hid: string, kind: RecurringKind, id: string): Promise<void> {
   const db = getDb();
   const from = monthStart(monthOf(today()));
   const now = new Date();
@@ -1285,6 +1453,24 @@ export async function deleteRecurring(hid: string, kind: 'expense' | 'income', i
           gte(expenses.recurrenceMonth, from),
           eq(expenses.paid, false),
           isNull(expenses.deletedAt),
+        ),
+      );
+  } else if (kind === 'investment') {
+    const [row] = await db
+      .update(recurringInvestments)
+      .set({ active: false, deletedAt: now })
+      .where(and(eq(recurringInvestments.id, id), eq(recurringInvestments.householdId, hid), isNull(recurringInvestments.deletedAt)))
+      .returning({ id: recurringInvestments.id });
+    if (!row) notFound();
+    await db
+      .update(investments)
+      .set({ deletedAt: now })
+      .where(
+        and(
+          eq(investments.recurringInvestmentId, id),
+          eq(investments.householdId, hid),
+          gte(investments.recurrenceMonth, from),
+          isNull(investments.deletedAt),
         ),
       );
   } else {

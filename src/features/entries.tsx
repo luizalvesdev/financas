@@ -570,6 +570,7 @@ function MonthStats({
   totals: { incomeCents: number; expenseCents: number; paidCents: number; investmentCents: number };
   data: MonthEntries | null;
 }) {
+  const c = useColors();
   const { month, changed } = useAppData();
   const ask = useConfirm();
   const [resetting, setResetting] = useState(false);
@@ -602,7 +603,17 @@ function MonthStats({
       <Stat label="Gastos do mês" cents={totals.expenseCents} />
       <Stat label="Já pago" cents={totals.paidCents} />
       <Stat label="A pagar" cents={totals.expenseCents - totals.paidCents} tone="warn" />
-      <Stat label="Investido" cents={totals.investmentCents} />
+      <Stat
+        label="Investido"
+        cents={totals.investmentCents}
+        footer={
+          data && (
+            <Txt size={13} color={c.text2} numberOfLines={1}>
+              Total até {formatMonth(month).toLowerCase()}: <Txt size={13} weight={700}>{formatMoney(data.investedTotalCents)}</Txt>
+            </Txt>
+          )
+        }
+      />
       <Stat label="Saldo previsto" cents={forecast} tone="balance" />
       <Stat
         label="Saldo com mês anterior"

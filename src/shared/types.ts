@@ -99,6 +99,8 @@ export type MonthEntries = {
   carryOverCents: number;
   // This month's leftover balance was cleared, so the next month carries nothing over.
   balanceReset: boolean;
+  // Everything invested up to the end of the month, counting recurring months not opened yet.
+  investedTotalCents: number;
 };
 
 export type InstallmentPlan = {

@@ -608,9 +608,14 @@ function MonthStats({
         cents={totals.investmentCents}
         footer={
           data && (
-            <Txt size={13} color={c.text2} numberOfLines={1}>
-              Total até {formatMonth(month).toLowerCase()}: <Txt size={13} weight={700}>{formatMoney(data.investedTotalCents)}</Txt>
-            </Txt>
+            <View style={{ marginTop: 4 }}>
+              <Txt size={12} color={c.text2} numberOfLines={1}>
+                Total até {formatMonth(month).toLowerCase()}
+              </Txt>
+              <Txt size={15} weight={700} numeric numberOfLines={1}>
+                {formatMoney(data.investedTotalCents)}
+              </Txt>
+            </View>
           )
         }
       />

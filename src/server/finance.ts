@@ -274,7 +274,8 @@ export async function listMonth(hid: string, month: string): Promise<MonthEntrie
   await ensureRecurring(hid, month);
   const db = getDb();
   const start = monthStart(month);
-  const [expenseRows, incomeRows, investmentRows, expensesBefore, incomesBefore, investmentsBefore, resetRows] = await db.batch([
+  const [expenseRows, incomeRows, investmentRows, expensesBefore, incomesBefore, investmentsBefore, resetRows, investedRows, templates, occurrences] =
+    await db.batch([
     db
       .select(expenseColumns)
       .from(expenses)
@@ -310,6 +311,7 @@ export async function listMonth(hid: string, month: string): Promise<MonthEntrie
       .select({ month: balanceResets.month })
       .from(balanceResets)
       .where(and(eq(balanceResets.householdId, hid), eq(balanceResets.month, start))),
+    ...investedTotalQueries(hid, month),
   ]);
   return {
     expenses: expenseRows.map(toExpense),
@@ -317,6 +319,7 @@ export async function listMonth(hid: string, month: string): Promise<MonthEntrie
     investments: investmentRows.map(toInvestment),
     carryOverCents: Number(incomesBefore[0].total) - Number(expensesBefore[0].total) - Number(investmentsBefore[0].total),
     balanceReset: resetRows.length > 0,
+    investedTotalCents: investedTotal(month, investedRows, templates, occurrences),
   };
 }
 
@@ -800,23 +803,25 @@ export async function stopRecurringIncome(hid: string, id: string): Promise<void
   await endIncomeRecurrence(current.recurringIncomeId, monthStart(monthOf(current.receivedOn)));
 }
 
-// Recurring occurrences only exist for months that were opened, so the total adds the months of each
-// live template that have no row yet (a deleted occurrence still has its row, so it is not counted).
-export async function listInvestments(hid: string, month: string): Promise<InvestmentsMonth> {
-  await ensureRecurring(hid, month);
+// Everything invested up to the end of `month`. Recurring occurrences only exist for months that were
+// opened, so this adds the months of each live template that have no row yet (a deleted occurrence
+// still has its row, so it is not counted). Nothing is written: the other recurrences of those months
+// are not generated either, and writing these would skew the carried-over balance.
+function investedTotalQueries(hid: string, month: string) {
   const db = getDb();
-  const live = and(eq(investments.householdId, hid), isNull(investments.deletedAt));
   const end = monthEnd(month);
-  const [rows, total, templates, occurrences] = await db.batch([
-    selectInvestments()
-      .where(and(live, gte(investments.investedOn, monthStart(month)), lte(investments.investedOn, end)))
-      .orderBy(desc(investments.investedOn), desc(investments.createdAt)),
+  return [
     db
       .select({ total: sql<string>`coalesce(sum(${investments.amountCents}), 0)` })
       .from(investments)
-      .where(and(live, lte(investments.investedOn, end))),
+      .where(and(eq(investments.householdId, hid), isNull(investments.deletedAt), lte(investments.investedOn, end))),
     db
-      .select({ id: recurringInvestments.id, amountCents: recurringInvestments.amountCents, startsOn: recurringInvestments.startsOn, endsOn: recurringInvestments.endsOn })
+      .select({
+        id: recurringInvestments.id,
+        amountCents: recurringInvestments.amountCents,
+        startsOn: recurringInvestments.startsOn,
+        endsOn: recurringInvestments.endsOn,
+      })
       .from(recurringInvestments)
       .where(
         and(
@@ -830,7 +835,16 @@ export async function listInvestments(hid: string, month: string): Promise<Inves
       .select({ templateId: investments.recurringInvestmentId, month: investments.recurrenceMonth })
       .from(investments)
       .where(and(eq(investments.householdId, hid), sql`${investments.recurringInvestmentId} is not null`, lte(investments.recurrenceMonth, end))),
-  ]);
+  ] as const;
+}
+
+function investedTotal(
+  month: string,
+  total: { total: string }[],
+  templates: { id: string; amountCents: number; startsOn: string; endsOn: string | null }[],
+  occurrences: { templateId: string | null; month: string | null }[],
+): number {
+  const end = monthEnd(month);
   const existing = new Set(occurrences.map((o) => `${o.templateId}:${o.month}`));
   let pendingCents = 0;
   for (const t of templates) {
@@ -839,10 +853,29 @@ export async function listInvestments(hid: string, month: string): Promise<Inves
       if (!existing.has(`${t.id}:${monthStart(m)}`)) pendingCents += t.amountCents;
     }
   }
+  return Number(total[0].total) + pendingCents;
+}
+
+export async function listInvestments(hid: string, month: string): Promise<InvestmentsMonth> {
+  await ensureRecurring(hid, month);
+  const db = getDb();
+  const [rows, total, templates, occurrences] = await db.batch([
+    selectInvestments()
+      .where(
+        and(
+          eq(investments.householdId, hid),
+          isNull(investments.deletedAt),
+          gte(investments.investedOn, monthStart(month)),
+          lte(investments.investedOn, monthEnd(month)),
+        ),
+      )
+      .orderBy(desc(investments.investedOn), desc(investments.createdAt)),
+    ...investedTotalQueries(hid, month),
+  ]);
   return {
     investments: rows.map(toInvestment),
     monthCents: rows.reduce((sum, r) => sum + r.amountCents, 0),
-    totalCents: Number(total[0].total) + pendingCents,
+    totalCents: investedTotal(month, total, templates, occurrences),
   };
 }
 

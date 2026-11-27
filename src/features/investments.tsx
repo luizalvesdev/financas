@@ -1,3 +1,4 @@
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { Pressable, StyleSheet, View } from 'react-native';
 
 import { Button, EmptyState, ErrorNote, MonthSwitcher, Screen, Skeleton, Stat, Txt } from '@/components/ui';
@@ -50,9 +51,12 @@ function Content() {
                     pressed && { backgroundColor: c.surface2 },
                   ]}>
                   <View style={{ flex: 1, minWidth: 0 }}>
-                    <Txt size={15} weight={700} numberOfLines={1}>
-                      {i.description}
-                    </Txt>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <Txt size={15} weight={700} numberOfLines={1} style={{ flexShrink: 1 }}>
+                        {i.description}
+                      </Txt>
+                      {i.recurringInvestmentId ? <Ionicons name="repeat" size={14} color={c.text3} /> : null}
+                    </View>
                     <Txt size={13} color={c.text3}>
                       {[formatShortDate(i.investedOn), memberName(lookups, i.memberId)].join(' · ')}
                     </Txt>

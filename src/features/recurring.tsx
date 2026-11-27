@@ -26,6 +26,7 @@ const COLUMNS: Column[] = [
 
 function detailOf(r: Recurring, lookups: Lookups) {
   if (r.kind === 'income') return 'Entrada';
+  if (r.kind === 'investment') return 'Investimento';
   const category = lookups.categories.find((c) => c.id === r.categoryId)?.name;
   const account =
     lookups.accounts.find((a) => a.id === r.accountId)?.name ?? PAYMENT_METHODS.find((m) => m.value === r.paymentMethod)?.label;
@@ -249,6 +250,7 @@ export function RecurringPage() {
   const [editing, setEditing] = useState<string | null>(null);
   const expenses = (data ?? []).filter((r) => r.kind === 'expense');
   const incomes = (data ?? []).filter((r) => r.kind === 'income');
+  const investments = (data ?? []).filter((r) => r.kind === 'investment');
 
   const content =
     !data || !lookups ? (
@@ -257,6 +259,16 @@ export function RecurringPage() {
       <>
         <RecurringTable title="Gastos recorrentes" items={expenses} lookups={lookups} editing={editing} setEditing={setEditing} actions={actions} />
         <RecurringTable title="Entradas recorrentes" items={incomes} lookups={lookups} editing={editing} setEditing={setEditing} actions={actions} />
+        {investments.length > 0 && (
+          <RecurringTable
+            title="Investimentos recorrentes"
+            items={investments}
+            lookups={lookups}
+            editing={editing}
+            setEditing={setEditing}
+            actions={actions}
+          />
+        )}
       </>
     ) : (
       <>
@@ -264,6 +276,12 @@ export function RecurringPage() {
         <MobileRecurringList items={expenses} lookups={lookups} actions={actions} />
         <SectionTitle>Entradas recorrentes</SectionTitle>
         <MobileRecurringList items={incomes} lookups={lookups} actions={actions} />
+        {investments.length > 0 && (
+          <>
+            <SectionTitle>Investimentos recorrentes</SectionTitle>
+            <MobileRecurringList items={investments} lookups={lookups} actions={actions} />
+          </>
+        )}
       </>
     );
 

@@ -451,6 +451,7 @@ export type InvestmentValues = {
   amountCents: number | null;
   investedOn: string;
   memberId: string | null;
+  recurring: boolean;
 };
 
 export type InvestmentSubmit = {
@@ -458,6 +459,8 @@ export type InvestmentSubmit = {
   amountCents: number;
   investedOn: string;
   memberId: string | null;
+  recurring?: boolean;
+  applyToFuture?: boolean;
 };
 
 export function InvestmentForm({
@@ -467,6 +470,9 @@ export function InvestmentForm({
   layout,
   header,
   bottom,
+  isRecurring,
+  recurrenceContinues,
+  canBeRecurring,
   onSubmit,
   onCancel,
 }: {
@@ -476,10 +482,14 @@ export function InvestmentForm({
   layout: FormLayout;
   header?: ReactNode;
   bottom?: ReactNode;
+  isRecurring?: boolean;
+  recurrenceContinues?: boolean;
+  canBeRecurring?: boolean;
   onSubmit: (values: InvestmentSubmit) => Promise<void>;
   onCancel?: () => void;
 }) {
   const [v, setV] = useState(initial);
+  const [applyToFuture, setApplyToFuture] = useState(recurrenceContinues ?? false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [tried, setTried] = useState(false);
@@ -499,6 +509,9 @@ export function InvestmentForm({
         amountCents: v.amountCents,
         investedOn: v.investedOn,
         memberId: v.memberId,
+        ...(mode === 'create' && v.recurring && { recurring: true }),
+        ...(mode === 'edit' && isRecurring && { applyToFuture }),
+        ...(mode === 'edit' && canBeRecurring && v.recurring && { recurring: true }),
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Erro ao salvar');
@@ -537,6 +550,20 @@ export function InvestmentForm({
         onChange={(id) => set('memberId', id)}
         allowNone="Casa"
       />
+      {mode === 'create' && (
+        <SwitchRow label="Recorrente" hint="Repete todo mês" value={v.recurring} onChange={(r) => set('recurring', r)} />
+      )}
+      {mode === 'edit' && isRecurring && (
+        <SwitchRow
+          label="Aplicar aos próximos meses"
+          hint={applyToFuture ? 'Repete todo mês; as edições valem para os próximos' : 'Desligado: remove os próximos meses'}
+          value={applyToFuture}
+          onChange={setApplyToFuture}
+        />
+      )}
+      {mode === 'edit' && canBeRecurring && (
+        <SwitchRow label="Investimento recorrente" hint="Repete todo mês" value={v.recurring} onChange={(r) => set('recurring', r)} />
+      )}
       <Note icon="trending-up-outline">O valor sai do saldo previsto e do saldo com mês anterior.</Note>
       {bottom}
       <ErrorNote>{error}</ErrorNote>

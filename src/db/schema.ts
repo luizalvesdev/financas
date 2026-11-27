@@ -261,6 +261,29 @@ export const balanceResets = pgTable(
   ],
 );
 
+export const recurringInvestments = pgTable(
+  'recurring_investments',
+  {
+    id: id(),
+    householdId: householdId(),
+    description: text('description').notNull(),
+    amountCents: money('amount_cents'),
+    dayOfMonth: smallint('day_of_month').notNull(),
+    memberId: uuid('member_id').references(() => members.id),
+    startsOn: day('starts_on').notNull(),
+    endsOn: day('ends_on'),
+    active: boolean('active').notNull().default(true),
+    // Soft delete: the template leaves the list and is never generated again, history stays.
+    deletedAt: timestamp('deleted_at', { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    check('recurring_investments_amount_positive', sql`${t.amountCents} > 0`),
+    check('recurring_investments_day_range', sql`${t.dayOfMonth} between 1 and 31`),
+  ],
+);
+
 // Money moved into investments: it leaves the balance (forecast and carried over) like an expense,
 // but it is not spending, so it stays out of categories, cards and the paid/unpaid split.
 export const investments = pgTable(
@@ -272,6 +295,10 @@ export const investments = pgTable(
     amountCents: money('amount_cents'),
     investedOn: day('invested_on').notNull(),
     memberId: uuid('member_id').references(() => members.id),
+    recurringInvestmentId: uuid('recurring_investment_id').references(() => recurringInvestments.id),
+    // First day of the month this occurrence belongs to; one per recurrence per month.
+    recurrenceMonth: day('recurrence_month'),
+    // Soft delete keeps the row, so a deleted recurring occurrence is not generated again.
     deletedAt: timestamp('deleted_at', { withTimezone: true }),
     createdByMemberId: uuid('created_by_member_id').references(() => members.id),
     createdAt: createdAt(),
@@ -279,7 +306,12 @@ export const investments = pgTable(
   },
   (t) => [
     index('investments_invested_on_idx').on(t.householdId, t.investedOn),
+    uniqueIndex('investments_recurrence_month_unique').on(t.recurringInvestmentId, t.recurrenceMonth),
     check('investments_amount_positive', sql`${t.amountCents} > 0`),
+    check(
+      'investments_recurrence_pair',
+      sql`(${t.recurringInvestmentId} is null) = (${t.recurrenceMonth} is null)`,
+    ),
   ],
 );
 

@@ -71,6 +71,9 @@ export type Investment = {
   amountCents: number;
   investedOn: string;
   memberId: string | null;
+  recurringInvestmentId: string | null;
+  // The recurrence is still live after this occurrence's month.
+  recurrenceContinues: boolean;
 };
 
 export type InvestmentInput = {
@@ -78,12 +81,13 @@ export type InvestmentInput = {
   amountCents: number;
   investedOn: string;
   memberId: string | null;
+  recurring?: boolean;
 };
 
 export type InvestmentsMonth = {
   investments: Investment[];
   monthCents: number;
-  // Everything invested so far, across all months.
+  // Everything invested up to today, across all months (future recurring occurrences excluded).
   totalCents: number;
 };
 
@@ -191,9 +195,11 @@ export type PlanSummary = {
   schedule: PlanScheduleItem[];
 };
 
+export type RecurringKind = 'expense' | 'income' | 'investment';
+
 export type Recurring = {
   id: string;
-  kind: 'expense' | 'income';
+  kind: RecurringKind;
   description: string;
   amountCents: number;
   dayOfMonth: number;

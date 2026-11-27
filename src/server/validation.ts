@@ -70,11 +70,18 @@ export const incomeUpdate = z.object({
   recurring: z.boolean().optional(),
 });
 
-export const investmentInput = z.object({
+const investmentFields = {
   description: text,
   amountCents: cents,
   investedOn: isoDate,
   memberId: uuid.nullable(),
+};
+
+export const investmentCreate = z.object({ ...investmentFields, recurring: z.boolean().optional() });
+export const investmentUpdate = z.object({
+  ...investmentFields,
+  applyToFuture: z.boolean().optional(),
+  recurring: z.boolean().optional(),
 });
 
 export const goalCents = z.number().int().min(0).max(100_000_000).nullable();
